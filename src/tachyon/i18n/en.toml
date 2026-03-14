@@ -1,0 +1,35 @@
+[report]
+executive_summary = "Executive Summary"
+top_findings = "Top Findings"
+evidence_chains = "Evidence Chains"
+detailed_metrics = "Detailed Metrics"
+optimization_tree = "Optimization Tree"
+no_significant_findings = "No significant findings detected."
+
+[finding.roofline]
+title = "Kernel is {bound_type}"
+detail = "SM throughput: {sm_pct}%, memory throughput: {mem_pct}%."
+
+[finding.mem_coalesce]
+title = "Low Memory Coalescing Efficiency"
+detail = "Global memory coalescing efficiency is {efficiency}%, below {threshold}% threshold."
+action = "Review global memory access patterns to ensure contiguous thread access."
+
+[finding.bank_conflict]
+title = "Shared Memory Bank Conflict"
+detail = "{conflict_count} bank conflicts detected in shared memory operations."
+action = "Pad shared memory arrays or adjust access strides to avoid bank conflicts."
+
+[finding.warp_stall]
+title = "Warp Stall: {stall_type}"
+detail = "{stall_type} accounts for {ratio}% of total stall cycles."
+action = "{suggestion}"
+
+[finding.l2_cache]
+title = "Low L2 Cache Hit Rate"
+detail = "L2 read hit rate is {hit_rate}%, below {threshold}% threshold."
+action = "Improve spatial/temporal locality through tiling or L2 persistence hints."
+
+[warning]
+no_debug_info = "Source mapping unavailable: kernel compiled without debug info. Add -lineinfo for full source attribution."
+partial_debug_info = "{degraded_count}/{total_count} hotspots lack source mapping. Recompile with -lineinfo."

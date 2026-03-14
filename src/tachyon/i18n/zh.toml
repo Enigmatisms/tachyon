@@ -1,0 +1,35 @@
+[report]
+executive_summary = "执行摘要"
+top_findings = "关键发现"
+evidence_chains = "证据链"
+detailed_metrics = "详细指标"
+optimization_tree = "优化探索树"
+no_significant_findings = "未检测到显著性能问题。"
+
+[finding.roofline]
+title = "Kernel 属于 {bound_type}"
+detail = "SM 吞吐率: {sm_pct}%，内存吞吐率: {mem_pct}%。"
+
+[finding.mem_coalesce]
+title = "全局内存合并效率低"
+detail = "全局内存合并效率为 {efficiency}%，低于 {threshold}% 阈值。"
+action = "检查全局内存访问模式，确保相邻线程访问连续地址。"
+
+[finding.bank_conflict]
+title = "共享内存 Bank 冲突"
+detail = "共享内存操作中检测到 {conflict_count} 次 bank 冲突。"
+action = "对共享内存数组进行填充或调整访问步长以避免 bank 冲突。"
+
+[finding.warp_stall]
+title = "Warp 停顿: {stall_type}"
+detail = "{stall_type} 占总停顿周期的 {ratio}%。"
+action = "{suggestion}"
+
+[finding.l2_cache]
+title = "L2 缓存命中率低"
+detail = "L2 读命中率为 {hit_rate}%，低于 {threshold}% 阈值。"
+action = "通过分块 (tiling) 或 L2 持久化提示改善空间/时间局部性。"
+
+[warning]
+no_debug_info = "源码映射不可用：kernel 编译时未包含调试信息。添加 -lineinfo 以获得完整源码归因。"
+partial_debug_info = "{degraded_count}/{total_count} 个热点缺少源码映射。请使用 -lineinfo 重新编译。"

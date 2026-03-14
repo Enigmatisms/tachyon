@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Testing / Coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Linting / Formatting
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CUDA build artifacts
+examples/cuda/01_matmul_naive
+examples/cuda/02_reduce_uncoalesced
+examples/cuda/03_stencil_2d
+examples/cuda/04_histogram_atomic
+examples/cuda/05_vectoradd_optimal
+examples/cuda/06_transpose_naive
+
+# NCU reports (large binary files)
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+
+# Environment
+.env
+.venv/
+venv/

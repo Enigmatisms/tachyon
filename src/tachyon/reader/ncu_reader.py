@@ -1,0 +1,488 @@
+"""NcuReportReader -- .ncu-rep binary report parser.
+
+Wraps NVIDIA's ncu_report.py to extract kernel data into KernelReport models.
+
+Runtime discovery of ncu_report.py follows a strict priority order:
+1. TACHYON_NCU_REPORT_PATH environment variable
+2. TachyonConfig tools.ncu_report_path (from config.toml or CLI)
+3. Well-known installation paths with version globs
+4. Already importable via PYTHONPATH / sys.path
+"""
+from __future__ import annotations
+
+import importlib
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+from tachyon.errors.handler import ErrorCode, ToolResult
+from tachyon.models.kernel import (
+    DeviceInfo,
+    InstancedMetricValue,
+    KernelReport,
+    LaunchParams,
+    MetricValue,
+    RuleResult,
+)
+
+logger = logging.getLogger(__name__)
+
+# Well-known installation paths for ncu_report.py, searched in order.
+# Users can override via TACHYON_NCU_REPORT_PATH env var or config.toml [tools].
+_NCU_SEARCH_PATHS = [
+    # Typical Linux system-wide installations
+    "/opt/nvidia/nsight-compute/{version}/extras/python",
+    # CUDA toolkit bundled copy
+    "/usr/local/cuda/nsight-compute/extras/python",
+    # User-local installations
+    "{home}/.local/nvidia/nsight-compute/extras/python",
+]
+
+_NCU_VERSION_GLOBS = ["2025.*", "2024.*", "2023.*"]
+
+
+def _resolve_path_arg(raw: str) -> Path | None:
+    """Resolve a user-supplied path that may point to a directory or file.
+
+    Returns the *directory* containing ncu_report.py, or None if invalid.
+    """
+    p = Path(raw).expanduser().resolve()
+    if p.is_dir() and (p / "ncu_report.py").exists():
+        return p
+    if p.is_file() and p.name == "ncu_report.py":
+        return p.parent
+    return None
+
+
+def _discover_ncu_report_path(
+    config_path: str | None = None,
+) -> Path | None:
+    """Search for ncu_report.py across known installation paths.
+
+    Priority:
+    1. TACHYON_NCU_REPORT_PATH environment variable  (highest)
+    2. *config_path* argument (from TachyonConfig tools.ncu_report_path)
+    3. Glob search through _NCU_SEARCH_PATHS x _NCU_VERSION_GLOBS
+    4. Already importable (user added to PYTHONPATH)  (lowest)
+
+    Returns the directory containing ``ncu_report.py``, or ``None`` when the
+    module is already importable and no explicit path is needed.
+    """
+    # ── Priority 1: explicit env var ──
+    env_path = os.environ.get("TACHYON_NCU_REPORT_PATH")
+    if env_path:
+        resolved = _resolve_path_arg(env_path)
+        if resolved is not None:
+            return resolved
+        logger.warning(
+            "TACHYON_NCU_REPORT_PATH=%s does not contain ncu_report.py; ignoring.",
+            env_path,
+        )
+
+    # ── Priority 2: config file value ──
+    if config_path:
+        resolved = _resolve_path_arg(config_path)
+        if resolved is not None:
+            return resolved
+        logger.warning(
+            "tools.ncu_report_path=%s does not contain ncu_report.py; ignoring.",
+            config_path,
+        )
+
+    # ── Priority 3: well-known paths with version globs ──
+    home = Path.home()
+    for path_template in _NCU_SEARCH_PATHS:
+        for version_glob in _NCU_VERSION_GLOBS:
+            pattern = path_template.format(version=version_glob, home=home)
+            pattern_path = Path(pattern)
+            parent = pattern_path.parent
+            if not parent.exists():
+                continue
+            # Glob on the final component to resolve version wildcards;
+            # reverse sort gives newest version first.
+            for candidate in sorted(
+                parent.glob(pattern_path.name), reverse=True
+            ):
+                if (candidate / "ncu_report.py").exists():
+                    return candidate
+
+    # ── Priority 4: already importable ──
+    try:
+        importlib.import_module("ncu_report")
+        return None  # None signals "already on sys.path"
+    except ImportError:
+        pass
+
+    return None
+
+
+def _load_ncu_module(config_path: str | None = None) -> Any:
+    """Import the ``ncu_report`` module, adding to sys.path if needed.
+
+    Args:
+        config_path: Optional explicit path from
+            ``TachyonConfig.tools.ncu_report_path``.
+    """
+    path = _discover_ncu_report_path(config_path=config_path)
+    if path is not None and str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+        logger.info("Added ncu_report.py path: %s", path)
+
+    try:
+        return importlib.import_module("ncu_report")
+    except ImportError as e:
+        raise ImportError(
+            "Cannot import ncu_report. Install NVIDIA Nsight Compute and set "
+            "TACHYON_NCU_REPORT_PATH, or add the extras/python directory to "
+            "PYTHONPATH."
+        ) from e
+
+
+# ---------------------------------------------------------------------------
+# NcuReportReader
+# ---------------------------------------------------------------------------
+
+class NcuReportReader:
+    """Reads ``.ncu-rep`` files and produces :class:`KernelReport` instances.
+
+    This is the pipeline entry point -- every downstream Analyzer, Correlator,
+    and Report layer consumes ``KernelReport`` objects produced here.
+    """
+
+    def __init__(self, config_ncu_report_path: str | None = None) -> None:
+        """Initialize the reader, discovering and loading ncu_report.
+
+        Args:
+            config_ncu_report_path: Optional path from
+                ``TachyonConfig.tools.ncu_report_path``. Passed through
+                to :func:`_load_ncu_module` for priority-2 lookup.
+        """
+        self._ncu = _load_ncu_module(config_path=config_ncu_report_path)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def load(self, path: str | Path) -> ToolResult[list[KernelReport]]:
+        """Load all kernel launches from an ``.ncu-rep`` file.
+
+        Returns :class:`ToolResult` to enable graceful error handling at
+        the CLI layer.  On success ``result.data`` is a list of
+        :class:`KernelReport`.
+        """
+        path = Path(path)
+
+        if not path.exists():
+            return ToolResult.fail(
+                ErrorCode.INVALID_BINARY,
+                f"File not found: {path}",
+                suggestion="Check the file path and ensure the .ncu-rep file exists.",
+            )
+
+        if path.suffix != ".ncu-rep":
+            return ToolResult.fail(
+                ErrorCode.UNSUPPORTED_FORMAT,
+                f"Unsupported file format: {path.suffix}",
+                suggestion=(
+                    "Tachyon only supports .ncu-rep files from NCU 2023.x-2025.x."
+                ),
+            )
+
+        try:
+            context = self._ncu.load_report(str(path))
+        except Exception as e:
+            return ToolResult.fail(
+                ErrorCode.INVALID_BINARY,
+                f"Failed to load report: {e}",
+                suggestion=(
+                    "The file may be corrupt or from an unsupported NCU version."
+                ),
+            )
+
+        reports: list[KernelReport] = []
+        for range_idx in range(context.num_ranges()):
+            ncu_range = context.range_by_idx(range_idx)
+            for action_idx in range(ncu_range.num_actions()):
+                action = ncu_range.action_by_idx(action_idx)
+                try:
+                    report = self._build_kernel_report(action)
+                    reports.append(report)
+                except Exception:
+                    logger.warning(
+                        "Skipping unparseable kernel action %d in range %d",
+                        action_idx,
+                        range_idx,
+                        exc_info=True,
+                    )
+
+        logger.info("Loaded %d kernel launches from %s", len(reports), path.name)
+        return ToolResult.ok(reports)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_kernel_report(self, action: Any) -> KernelReport:
+        """Convert a single IAction into a :class:`KernelReport`."""
+        return KernelReport(
+            kernel_name=action.name(),
+            demangled_name=self._safe_demangled_name(action),
+            launch_params=self._extract_launch_params(action),
+            device_info=self._extract_device_info(action),
+            metrics=self._extract_metrics(action),
+            instanced_metrics=self._extract_instanced_metrics(action),
+            source_files=self._extract_source_files(action),
+            rule_results=self._extract_rule_results(action),
+        )
+
+    # -- name --------------------------------------------------------
+
+    def _safe_demangled_name(self, action: Any) -> str:
+        """Get demangled kernel name with fallback to mangled name."""
+        try:
+            return action.demangled_name()
+        except (AttributeError, RuntimeError):
+            return action.name()
+
+    # -- launch params ------------------------------------------------
+
+    def _extract_launch_params(self, action: Any) -> LaunchParams:
+        """Extract CUDA launch configuration from action metrics."""
+
+        def _int_metric(name: str, default: int = 0) -> int:
+            try:
+                m = action.metric_by_name(name)
+                if m is not None and m.has_value():
+                    return int(m.as_uint64())
+            except (RuntimeError, ValueError, AttributeError):
+                pass
+            return default
+
+        return LaunchParams(
+            grid=(
+                _int_metric("launch__grid_dim_x", 1),
+                _int_metric("launch__grid_dim_y", 1),
+                _int_metric("launch__grid_dim_z", 1),
+            ),
+            block=(
+                _int_metric("launch__block_dim_x", 1),
+                _int_metric("launch__block_dim_y", 1),
+                _int_metric("launch__block_dim_z", 1),
+            ),
+            shared_mem_bytes=_int_metric("launch__shared_mem_per_block_dynamic"),
+            registers_per_thread=_int_metric("launch__registers_per_thread"),
+            static_shared_mem_bytes=_int_metric(
+                "launch__shared_mem_per_block_static"
+            ),
+        )
+
+    # -- device info --------------------------------------------------
+
+    def _extract_device_info(self, action: Any) -> DeviceInfo:
+        """Extract GPU device properties from action metrics."""
+
+        def _int_metric(name: str, default: int = 0) -> int:
+            try:
+                m = action.metric_by_name(name)
+                if m is not None and m.has_value():
+                    return int(m.as_uint64())
+            except (RuntimeError, ValueError, AttributeError):
+                pass
+            return default
+
+        def _double_metric(name: str, default: float = 0.0) -> float:
+            try:
+                m = action.metric_by_name(name)
+                if m is not None and m.has_value():
+                    return m.as_double()
+            except (RuntimeError, ValueError, AttributeError):
+                pass
+            return default
+
+        peak_bw_bytes = _double_metric("dram__bytes.sum.peak_sustained")
+
+        return DeviceInfo(
+            name=self._get_string_metric(
+                action, "device__attribute_display_name", "Unknown GPU"
+            ),
+            compute_capability=(
+                _int_metric("device__attribute_compute_capability_major"),
+                _int_metric("device__attribute_compute_capability_minor"),
+            ),
+            sm_count=_int_metric("device__attribute_multiprocessor_count"),
+            max_clock_mhz=_int_metric("device__attribute_clock_rate") // 1000,
+            memory_bus_width=_int_metric(
+                "device__attribute_global_memory_bus_width"
+            ),
+            peak_memory_bandwidth_gbps=(
+                peak_bw_bytes / 1e9 if peak_bw_bytes > 0 else 0.0
+            ),
+        )
+
+    # -- string metric helper -----------------------------------------
+
+    def _get_string_metric(
+        self, action: Any, name: str, default: str = ""
+    ) -> str:
+        """Get string-valued metric with fallback."""
+        try:
+            m = action.metric_by_name(name)
+            if m is not None and m.has_value():
+                return str(m.value())
+        except (AttributeError, RuntimeError):
+            pass
+        return default
+
+    # -- scalar metrics -----------------------------------------------
+
+    def _extract_metrics(self, action: Any) -> dict[str, MetricValue]:
+        """Extract all scalar (non-instanced) metrics from the action.
+
+        Iterates over every available metric name and captures those with
+        scalar values.  Instanced metrics (per-PC, ``num_instances > 1``)
+        are handled separately by :meth:`_extract_instanced_metrics`.
+        """
+        metrics: dict[str, MetricValue] = {}
+        try:
+            metric_names = action.metric_names()
+        except (AttributeError, RuntimeError):
+            return metrics
+
+        for name in metric_names:
+            try:
+                m = action.metric_by_name(name)
+                if m is None or not m.has_value():
+                    continue
+                # Skip instanced metrics -- they go to _extract_instanced_metrics
+                if m.num_instances() > 1:
+                    continue
+                metrics[name] = MetricValue(
+                    name=name,
+                    value=m.as_double(),
+                    unit=self._infer_unit(name),
+                )
+            except (RuntimeError, ValueError):
+                # Some metrics may not support as_double(); skip gracefully
+                continue
+        return metrics
+
+    # -- instanced metrics --------------------------------------------
+
+    def _extract_instanced_metrics(
+        self, action: Any
+    ) -> dict[str, list[InstancedMetricValue]]:
+        """Extract per-PC instanced metrics.
+
+        These are metrics with ``num_instances() > 1``, where each instance
+        corresponds to a specific PC address via ``correlation_ids()``.
+
+        In M1 we only extract stall-prefixed metrics that
+        :class:`WarpStallAnalyzer` needs.  Full extraction is deferred to
+        M2 when :class:`SourceCorrelator` requires all instanced metrics
+        for three-way mapping.
+        """
+        instanced: dict[str, list[InstancedMetricValue]] = {}
+
+        # M1 scope: only warp-stall PC-sampling metrics
+        stall_prefixes = ("smsp__pcsamp_warps_issue_stalled_",)
+
+        try:
+            metric_names = action.metric_names()
+        except (AttributeError, RuntimeError):
+            return instanced
+
+        for name in metric_names:
+            if not any(name.startswith(p) for p in stall_prefixes):
+                continue
+            try:
+                m = action.metric_by_name(name)
+                if m is None or not m.has_value() or m.num_instances() <= 1:
+                    continue
+                corr_ids = m.correlation_ids()
+                values: list[InstancedMetricValue] = []
+                for i in range(corr_ids.size()):
+                    pc = corr_ids.as_uint64(i)
+                    val = m.as_double(i)
+                    # Source info lookup deferred to M2 SourceCorrelator
+                    values.append(InstancedMetricValue(pc=pc, value=val))
+                instanced[name] = values
+            except (RuntimeError, ValueError, AttributeError):
+                continue
+
+        return instanced
+
+    # -- source files -------------------------------------------------
+
+    def _extract_source_files(self, action: Any) -> dict[str, str]:
+        """Extract embedded source file paths from the report.
+
+        Returns a mapping of ``{file_path: content}``.  Content is left
+        empty in M1; it will be populated on demand in M2 by
+        :class:`SourceCorrelator`.
+        """
+        files: dict[str, str] = {}
+        try:
+            for src in action.source_files():
+                files[str(src)] = ""  # Content populated on demand in M2
+        except (AttributeError, RuntimeError):
+            pass
+        return files
+
+    # -- rule results -------------------------------------------------
+
+    def _extract_rule_results(self, action: Any) -> list[RuleResult]:
+        """Extract NCU built-in rule analysis results."""
+        results: list[RuleResult] = []
+        try:
+            for rule_dict in action.rule_results_as_dicts():
+                msg = rule_dict.get("rule_message", {})
+                results.append(
+                    RuleResult(
+                        rule_name=rule_dict.get(
+                            "rule_identifier",
+                            rule_dict.get("name", "unknown"),
+                        ),
+                        severity=self._map_rule_severity(msg.get("type")),
+                        message=msg.get("message", ""),
+                    )
+                )
+        except (AttributeError, RuntimeError):
+            pass
+        return results
+
+    # ------------------------------------------------------------------
+    # Static utilities
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _map_rule_severity(msg_type: Any) -> str:
+        """Map NvRules MsgType enum value to a severity string.
+
+        NvRules defines: OK=0, LOW=1, MED=2, HIGH=3.
+        """
+        type_map = {0: "OK", 1: "LOW", 2: "MED", 3: "HIGH"}
+        if isinstance(msg_type, int):
+            return type_map.get(msg_type, "OK")
+        return str(msg_type) if msg_type else "OK"
+
+    @staticmethod
+    def _infer_unit(metric_name: str) -> str:
+        """Infer the unit from NCU metric name suffix conventions.
+
+        NCU metric names follow predictable patterns that encode the unit
+        (e.g. ``dram__bytes.sum``, ``sm__throughput.avg.pct_of_peak_sustained``).
+        """
+        if "pct" in metric_name:
+            return "%"
+        if metric_name.endswith(".sum") or metric_name.endswith(".avg"):
+            if "bytes" in metric_name:
+                return "byte"
+            if "sectors" in metric_name:
+                return "sector"
+            if "requests" in metric_name:
+                return "request"
+            if "cycles" in metric_name or "cycle" in metric_name:
+                return "cycle"
+        return ""

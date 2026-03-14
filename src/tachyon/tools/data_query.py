@@ -1,0 +1,203 @@
+"""Data query tools — expose kernel metrics and NCU rule results to the Agent.
+
+4 tools:
+  - list_kernels: List all kernels in the loaded report
+  - get_kernel_metrics: Get scalar metrics for a specific kernel
+  - get_kernel_summary: Get a concise summary of kernel characteristics
+  - get_ncu_rule_results: Get NCU built-in rule analysis results
+
+Token-efficiency: Output is compact JSON — no redundant whitespace or keys.
+Large metric dicts are optionally filtered by caller-specified metric_names.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from ..errors.handler import ErrorCode, ToolResult
+from .context import SessionContext
+from .registry import ToolDefinition, ToolRegistry
+
+
+def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
+    """Register 4 data query tools against a ToolRegistry."""
+
+    # --- list_kernels ---
+    async def list_kernels() -> ToolResult:
+        """List all kernels in the loaded report."""
+        try:
+            items = []
+            for i, k in enumerate(ctx.kernels):
+                items.append({
+                    "kernel_id": i,
+                    "name": k.demangled_name or k.kernel_name,
+                    "grid": list(k.launch_params.grid),
+                    "block": list(k.launch_params.block),
+                    "registers": k.launch_params.registers_per_thread,
+                })
+            return ToolResult.ok(items)
+        except Exception as e:
+            return ToolResult.fail(ErrorCode.UNKNOWN, str(e))
+
+    registry.register(ToolDefinition(
+        name="list_kernels",
+        description=(
+            "List all CUDA kernels in the profiling report. "
+            "Returns kernel_id, name, grid/block dimensions. "
+            "Use this first to understand what kernels are available."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        handler=list_kernels,
+    ))
+
+    # --- get_kernel_metrics ---
+    async def get_kernel_metrics(
+        kernel_id: int, metric_names: list[str] | None = None,
+    ) -> ToolResult:
+        """Get scalar metrics for a specific kernel."""
+        try:
+            kernel = ctx.get_kernel(kernel_id)
+            result: dict[str, Any] = {}
+            if metric_names:
+                for name in metric_names:
+                    mv = kernel.metrics.get(name)
+                    if mv is not None:
+                        result[name] = {"value": mv.value, "unit": mv.unit}
+                    else:
+                        result[name] = None
+            else:
+                for name, mv in kernel.metrics.items():
+                    result[name] = {"value": mv.value, "unit": mv.unit}
+            return ToolResult.ok(result)
+        except IndexError as e:
+            return ToolResult.fail(ErrorCode.METRIC_NOT_FOUND, str(e))
+        except Exception as e:
+            return ToolResult.fail(ErrorCode.UNKNOWN, str(e))
+
+    registry.register(ToolDefinition(
+        name="get_kernel_metrics",
+        description=(
+            "Get performance metrics for a kernel by kernel_id. "
+            "If metric_names is omitted, returns all metrics. "
+            "Returns {name: {value, unit}} dict."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "kernel_id": {
+                    "type": "integer",
+                    "description": "Kernel ID from list_kernels.",
+                },
+                "metric_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of metric names to filter.",
+                },
+            },
+            "required": ["kernel_id"],
+        },
+        handler=get_kernel_metrics,
+    ))
+
+    # --- get_kernel_summary ---
+    async def get_kernel_summary(kernel_id: int) -> ToolResult:
+        """Get a concise summary of a kernel's characteristics."""
+        try:
+            k = ctx.get_kernel(kernel_id)
+            summary = {
+                "name": k.demangled_name or k.kernel_name,
+                "launch": {
+                    "grid": list(k.launch_params.grid),
+                    "block": list(k.launch_params.block),
+                    "shared_mem": k.launch_params.shared_mem_bytes,
+                    "registers": k.launch_params.registers_per_thread,
+                    "total_threads": k.launch_params.total_threads,
+                },
+                "device": {
+                    "name": k.device_info.name,
+                    "cc": (
+                        f"{k.device_info.compute_capability[0]}"
+                        f".{k.device_info.compute_capability[1]}"
+                    ),
+                    "sm_count": k.device_info.sm_count,
+                },
+                "key_metrics": {},
+            }
+            # Include key performance metrics if available
+            key_names = [
+                "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+                "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                "sm__warps_active.avg.pct_of_peak_sustained_active",
+            ]
+            short = {"sm__throughput": "sm_pct", "dram__throughput": "dram_pct",
+                      "sm__warps_active": "occupancy_pct"}
+            for name in key_names:
+                mv = k.metrics.get(name)
+                if mv is not None:
+                    prefix = name.split(".")[0]
+                    label = short.get(prefix, prefix)
+                    summary["key_metrics"][label] = round(mv.value, 1)
+            return ToolResult.ok(summary)
+        except IndexError as e:
+            return ToolResult.fail(ErrorCode.METRIC_NOT_FOUND, str(e))
+        except Exception as e:
+            return ToolResult.fail(ErrorCode.UNKNOWN, str(e))
+
+    registry.register(ToolDefinition(
+        name="get_kernel_summary",
+        description=(
+            "Get concise kernel summary: launch params, device info, key metrics "
+            "(SM throughput, DRAM throughput, occupancy). Good starting point."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "kernel_id": {
+                    "type": "integer",
+                    "description": "Kernel ID from list_kernels.",
+                },
+            },
+            "required": ["kernel_id"],
+        },
+        handler=get_kernel_summary,
+    ))
+
+    # --- get_ncu_rule_results ---
+    async def get_ncu_rule_results(kernel_id: int) -> ToolResult:
+        """Get NCU built-in rule analysis results for a kernel."""
+        try:
+            k = ctx.get_kernel(kernel_id)
+            return ToolResult.ok([
+                {
+                    "rule": r.rule_name,
+                    "severity": r.severity,
+                    "message": r.message[:200],  # truncate for token efficiency
+                }
+                for r in k.rule_results
+            ])
+        except IndexError as e:
+            return ToolResult.fail(ErrorCode.METRIC_NOT_FOUND, str(e))
+        except Exception as e:
+            return ToolResult.fail(ErrorCode.UNKNOWN, str(e))
+
+    registry.register(ToolDefinition(
+        name="get_ncu_rule_results",
+        description=(
+            "Get NCU built-in rule analysis results (SpeedOfLight, "
+            "MemoryWorkloadAnalysis, etc.). Complements Tachyon's analyzers."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "kernel_id": {
+                    "type": "integer",
+                    "description": "Kernel ID from list_kernels.",
+                },
+            },
+            "required": ["kernel_id"],
+        },
+        handler=get_ncu_rule_results,
+    ))

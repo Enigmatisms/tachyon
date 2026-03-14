@@ -1,0 +1,1 @@
+"""Report layer — output formatting."""

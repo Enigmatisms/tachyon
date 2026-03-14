@@ -1,0 +1,116 @@
+"""Unit tests for configuration management."""
+import os
+from pathlib import Path
+from unittest.mock import patch
+
+from tachyon.config.settings import (
+    TachyonConfig,
+)
+
+
+class TestDefaultConfig:
+    def test_defaults(self):
+        cfg = TachyonConfig()
+        assert cfg.llm.provider == "openai"
+        assert cfg.llm.model == "gpt-4o"
+        assert cfg.profiling.strategy == "conservative"
+        assert cfg.output.lang == "en"
+        assert cfg.output.format == "terminal"
+        assert cfg.tools.ncu_path is None
+
+    def test_load_no_file(self, tmp_path: Path):
+        """Load with nonexistent config file returns defaults."""
+        cfg = TachyonConfig.load(tmp_path / "nonexistent.toml")
+        assert cfg.llm.provider == "openai"
+        assert cfg.output.format == "terminal"
+
+
+class TestTomlOverride:
+    def test_load_toml(self, tmp_path: Path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("""
+[llm]
+provider = "anthropic"
+model = "claude-3-opus"
+temperature = 0.5
+
+[profiling]
+strategy = "radical"
+
+[output]
+lang = "zh"
+format = "markdown"
+
+[tools]
+ncu_path = "/custom/ncu"
+""")
+        cfg = TachyonConfig.load(config_file)
+        assert cfg.llm.provider == "anthropic"
+        assert cfg.llm.model == "claude-3-opus"
+        assert cfg.llm.temperature == 0.5
+        assert cfg.profiling.strategy == "radical"
+        assert cfg.output.lang == "zh"
+        assert cfg.output.format == "markdown"
+        assert cfg.tools.ncu_path == "/custom/ncu"
+
+
+class TestEnvOverride:
+    def test_env_overrides(self):
+        env = {
+            "TACHYON_LLM_PROVIDER": "litellm",
+            "TACHYON_MODEL": "gpt-4-turbo",
+            "TACHYON_LANG": "zh",
+            "TACHYON_STRATEGY": "radical",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            cfg = TachyonConfig()
+            cfg._apply_env()
+            assert cfg.llm.provider == "litellm"
+            assert cfg.llm.model == "gpt-4-turbo"
+            assert cfg.output.lang == "zh"
+            assert cfg.profiling.strategy == "radical"
+
+    def test_env_ncu_report_path(self):
+        with patch.dict(os.environ, {"TACHYON_NCU_REPORT_PATH": "/my/ncu"}):
+            cfg = TachyonConfig()
+            cfg._apply_env()
+            assert cfg.tools.ncu_report_path == "/my/ncu"
+
+
+class TestCliOverride:
+    def test_cli_overrides(self):
+        cfg = TachyonConfig()
+        cfg.apply_cli_overrides(
+            model="custom-model",
+            lang="zh",
+            format="json",
+            strategy="radical",
+        )
+        assert cfg.llm.model == "custom-model"
+        assert cfg.output.lang == "zh"
+        assert cfg.output.format == "json"
+        assert cfg.profiling.strategy == "radical"
+
+    def test_cli_partial_override(self):
+        cfg = TachyonConfig()
+        cfg.apply_cli_overrides(format="markdown")
+        assert cfg.output.format == "markdown"
+        assert cfg.llm.provider == "openai"  # unchanged
+
+
+class TestPriorityOrder:
+    def test_env_overrides_toml(self, tmp_path: Path):
+        """Environment variables should override TOML config."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text('[llm]\nprovider = "anthropic"\n')
+
+        with patch.dict(os.environ, {"TACHYON_LLM_PROVIDER": "litellm"}):
+            cfg = TachyonConfig.load(config_file)
+            assert cfg.llm.provider == "litellm"
+
+    def test_cli_overrides_env(self, tmp_path: Path):
+        """CLI should override environment variables."""
+        with patch.dict(os.environ, {"TACHYON_LANG": "zh"}):
+            cfg = TachyonConfig.load(tmp_path / "none.toml")
+            cfg.apply_cli_overrides(lang="en")
+            assert cfg.output.lang == "en"
