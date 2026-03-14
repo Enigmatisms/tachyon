@@ -1,5 +1,7 @@
 # Tachyon
 
+English Doc (Current) | [中文文档](./README.zh-CN.md)
+
 **AI empowered CUDA kernel profiler**
 
 Tachyon `/ˈtakēˌän/` (tachyon — a theoretical particle that travels faster than light) is a CUDA kernel performance analyzer that combines LLM-powered agents with traditional rule-based analysis. Unlike existing open-source tools, Tachyon bridges the full path from NCU metrics to CUDA source code to low-level instructions (PTX/SASS), so performance analysis doesn't stop at aggregate counters — it traces back through the instruction level all the way to your source lines. Like a tachyon traveling faster than the speed of light and reversing through time, we aim to optimize faster than your current speed-of-light, with the ability to trace back to root causes.

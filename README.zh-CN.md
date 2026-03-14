@@ -1,5 +1,7 @@
 # Tachyon
 
+[中文文档 (当前)](./README.zh-CN.md) | English Doc 
+
 **AI empowered CUDA kernel profiler**
 
 Tachyon `/ˈtakēˌän/` (迅子，物理上一种只存在于理论上的速度快于光速的粒子) 是一个同时支持大模型 Agent 与传统基于规则的 CUDA kernel 性能分析工具。与现有的开源工具不同，本项目尝试将 NCU 指标 与 CUDA 源码、以及底层指令（如 PTX 或 SASS）这条路径打通，使得性能分析不止停留于报告指标的分析上，更能通过指令级分析回溯到源码层。这就类似迅子快于光速时，其飞行时逆着时间回溯的。我们希望优化结果速度极快（比目前你手动优化的 speed of light 快），并且有回溯能力。
