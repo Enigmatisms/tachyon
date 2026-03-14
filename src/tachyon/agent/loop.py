@@ -133,10 +133,14 @@ async def run_agent_loop(
             assert isinstance(response, CompletionResponse)
             content = response.content
             tool_calls = response.tool_calls
-            _update_usage(usage, {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-            })
+            u = response.usage
+            if isinstance(u, dict):
+                _update_usage(usage, u)
+            else:
+                _update_usage(usage, {
+                    "prompt_tokens": getattr(u, "prompt_tokens", 0),
+                    "completion_tokens": getattr(u, "completion_tokens", 0),
+                })
 
         # No tool calls → final answer
         if not tool_calls:

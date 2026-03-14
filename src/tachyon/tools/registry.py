@@ -9,6 +9,7 @@ parameters use minimal required fields. Tool results are serialized compactly.
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -89,8 +90,10 @@ class ToolRegistry:
         """Return all registered tool names."""
         return list(self._tools.keys())
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+    async def execute(self, name: str, arguments: dict[str, Any] | str) -> ToolResult:
         """Execute a tool by name with given arguments.
+
+        Arguments can be a dict or a JSON string (from LLM responses).
 
         Returns:
             ToolResult with success/data or failure/error.
@@ -107,6 +110,17 @@ class ToolRegistry:
                 ErrorCode.UNKNOWN,
                 f"Tool '{name}' has no handler",
             )
+        # Normalize arguments: accept JSON string or dict
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments) if arguments.strip() else {}
+            except json.JSONDecodeError:
+                return ToolResult.fail(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"Invalid JSON arguments for tool '{name}': {arguments[:200]}",
+                )
+        if not isinstance(arguments, dict):
+            arguments = {}
         try:
             return await tool.handler(**arguments)
         except Exception as e:
