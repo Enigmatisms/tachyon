@@ -1,7 +1,7 @@
 """Data query tools — expose kernel metrics and NCU rule results to the Agent.
 
 4 tools:
-  - list_kernels: List all kernels in the loaded report
+  - list_kernels: List all kernels in the loaded report (with optional name filter)
   - get_kernel_metrics: Get scalar metrics for a specific kernel
   - get_kernel_summary: Get a concise summary of kernel characteristics
   - get_ncu_rule_results: Get NCU built-in rule analysis results
@@ -22,14 +22,21 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
     """Register 4 data query tools against a ToolRegistry."""
 
     # --- list_kernels ---
-    async def list_kernels() -> ToolResult:
-        """List all kernels in the loaded report."""
+    async def list_kernels(name_pattern: str | None = None) -> ToolResult:
+        """List all kernels in the loaded report, optionally filtered by name pattern."""
         try:
+            from tachyon.utils.kernel_filter import match_kernel_name
+
             items = []
             for i, k in enumerate(ctx.kernels):
+                name = k.demangled_name or k.kernel_name
+                if name_pattern and not match_kernel_name(
+                    k.kernel_name, k.demangled_name, name_pattern
+                ):
+                    continue
                 items.append({
                     "kernel_id": i,
-                    "name": k.demangled_name or k.kernel_name,
+                    "name": name,
                     "grid": list(k.launch_params.grid),
                     "block": list(k.launch_params.block),
                     "registers": k.launch_params.registers_per_thread,
@@ -41,13 +48,19 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
     registry.register(ToolDefinition(
         name="list_kernels",
         description=(
-            "List all CUDA kernels in the profiling report. "
+            "List CUDA kernels in the profiling report. "
             "Returns kernel_id, name, grid/block dimensions. "
-            "Use this first to understand what kernels are available."
+            "Use name_pattern to filter by glob (e.g. 'matmul*') or substring match. "
+            "Use this first to find the kernel(s) you want to analyze."
         ),
         parameters={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "name_pattern": {
+                    "type": "string",
+                    "description": "Optional glob pattern or substring to filter kernel names (e.g. 'matmul*', 'reduce').",
+                },
+            },
             "required": [],
         },
         handler=list_kernels,

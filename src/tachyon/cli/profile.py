@@ -47,6 +47,18 @@ from tachyon.config.settings import TachyonConfig
     help="Extra arguments to pass to ncu (quoted string).",
 )
 @click.option(
+    "--ncu-set",
+    type=click.Choice(["basic", "detailed", "full"]),
+    default=None,
+    help="Override NCU metric set (overrides --strategy).",
+)
+@click.option(
+    "--ncu-metrics",
+    type=str,
+    default=None,
+    help="Comma-separated NCU metrics (replaces --set, e.g. 'sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed').",
+)
+@click.option(
     "--output",
     "-o",
     type=click.Path(path_type=Path),
@@ -84,6 +96,8 @@ def profile(
     kernel: tuple[str, ...],
     top_k: int,
     ncu_args: str | None,
+    ncu_set: str | None,
+    ncu_metrics: str | None,
     output: Path | None,
     no_ai: bool,
     fmt: str,
@@ -109,9 +123,26 @@ def profile(
 
     from tachyon.profiler.ncu_profiler import ProfilingStrategy
     from tachyon.profiler.pipeline import run_e2e_pipeline
+    from tachyon.utils.progress import console, print_error_panel, print_profile_summary
 
     extra_ncu = ncu_args.split() if ncu_args else None
     strat = ProfilingStrategy(strategy) if strategy else None
+
+    # Convert glob patterns to NCU regexes for --kernel-name
+    kernel_list: list[str] | None = None
+    if kernel:
+        from tachyon.utils.kernel_filter import to_ncu_regex
+        kernel_list = [to_ncu_regex(k) for k in kernel]
+
+    # Display profiling configuration summary
+    print_profile_summary(
+        executable=executable,
+        strategy=strategy or config.profiling.strategy,
+        kernels=list(kernel) if kernel else None,
+        ncu_set=ncu_set,
+        ncu_metrics=ncu_metrics,
+        top_k=top_k,
+    )
 
     result = asyncio.run(
         run_e2e_pipeline(
@@ -120,23 +151,30 @@ def profile(
             config=config,
             strategy=strat,
             top_k=top_k,
-            kernel_filter=list(kernel) if kernel else None,
+            kernel_filter=kernel_list,
             use_ai=not no_ai,
             output_dir=output,
             extra_ncu_args=extra_ncu,
+            metric_set_override=ncu_set,
+            metrics_override=ncu_metrics,
             verbose=verbose,
         )
     )
 
     if not result.success:
         assert result.error is not None
-        click.secho(f"Error: {result.error.message}", fg="red", err=True)
-        if result.error.suggestion:
-            click.echo(f"Suggestion: {result.error.suggestion}", err=True)
+        print_error_panel(
+            "Pipeline Error",
+            result.error.message,
+            suggestion=result.error.suggestion,
+        )
         sys.exit(1)
 
     assert result.data is not None
     report_path = result.data
+
+    console.print()
+    console.rule("[bold green]Analysis[/bold green]")
 
     # --- Run analysis on the profiled report ---
     _analyze_report(report_path, config, fmt, verbose, no_ai, output)

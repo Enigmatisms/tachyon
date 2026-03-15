@@ -41,6 +41,7 @@ console = Console()
 )
 @click.option("--provider", "-p", default=None, help="LLM provider (openai/anthropic/litellm)")
 @click.option("--no-ai", is_flag=True, help="Force Rule-Only mode (no LLM)")
+@click.option("--kernel", "-k", default=None, help="Filter kernels by name (glob pattern, e.g. 'matmul*').")
 @click.option("--lang", default=None, help="Language (en/zh)")
 @click.option("--verbose", "-v", is_flag=True, help="Show tool calls and debug info")
 def chat(
@@ -48,6 +49,7 @@ def chat(
     model: str | None,
     provider: str | None,
     no_ai: bool,
+    kernel: str | None,
     lang: str | None,
     verbose: bool,
 ) -> None:
@@ -82,6 +84,14 @@ def chat(
     if not kernels:
         console.print("[red]Error: No kernels found in report.[/red]")
         sys.exit(1)
+
+    # Filter kernels if --kernel specified
+    if kernel:
+        from tachyon.utils.kernel_filter import filter_kernels
+        kernels = filter_kernels(kernels, kernel)
+        if not kernels:
+            console.print(f"[red]No kernels matching '{kernel}'.[/red]")
+            sys.exit(1)
 
     console.print(f"Loaded [bold green]{len(kernels)}[/bold green] kernel(s).")
     for i, k in enumerate(kernels):

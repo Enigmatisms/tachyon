@@ -12,7 +12,6 @@ Pipeline: load report -> filter kernels -> run analyzers -> severity filter -> r
 """
 from __future__ import annotations
 
-import fnmatch
 import logging
 import sys
 from pathlib import Path
@@ -91,11 +90,8 @@ def analyze(
 
     # ── Step 2: Filter kernels if --kernel specified ──
     if kernel:
-        reports = [
-            r for r in reports
-            if fnmatch.fnmatch(r.demangled_name, kernel)
-            or fnmatch.fnmatch(r.kernel_name, kernel)
-        ]
+        from tachyon.utils.kernel_filter import filter_kernels
+        reports = filter_kernels(reports, kernel)
         if not reports:
             click.secho(
                 f"No kernels matching '{kernel}' found.", fg="yellow", err=True

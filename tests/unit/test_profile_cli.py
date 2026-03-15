@@ -151,6 +151,37 @@ class TestProfileCommand:
 
         assert result.exit_code != 0
 
+    def test_profile_with_ncu_set(self, runner):
+        """--ncu-set option is accepted and overrides strategy."""
+        from tachyon.cli.main import app
+
+        fail_result = ToolResult.fail(ErrorCode.TOOL_NOT_FOUND, "ncu not found")
+
+        with patch("tachyon.cli.profile.asyncio") as mock_asyncio, \
+             patch("tachyon.cli.profile.TachyonConfig") as mock_cfg:
+            mock_cfg.load.return_value = TachyonConfig()
+            mock_asyncio.run.return_value = fail_result
+            result = runner.invoke(app, ["profile", "--ncu-set", "full", "./app"])
+
+        assert result.exit_code != 0
+
+    def test_profile_with_ncu_metrics(self, runner):
+        """--ncu-metrics option is accepted."""
+        from tachyon.cli.main import app
+
+        fail_result = ToolResult.fail(ErrorCode.TOOL_NOT_FOUND, "ncu not found")
+
+        with patch("tachyon.cli.profile.asyncio") as mock_asyncio, \
+             patch("tachyon.cli.profile.TachyonConfig") as mock_cfg:
+            mock_cfg.load.return_value = TachyonConfig()
+            mock_asyncio.run.return_value = fail_result
+            result = runner.invoke(
+                app,
+                ["profile", "--ncu-metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed", "./app"],
+            )
+
+        assert result.exit_code != 0
+
 
 class TestAnalyzeReport:
 

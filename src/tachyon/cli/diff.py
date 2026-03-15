@@ -9,7 +9,6 @@ Usage examples::
 """
 from __future__ import annotations
 
-import fnmatch
 import sys
 from pathlib import Path
 
@@ -76,16 +75,9 @@ def diff(
 
     # Optional kernel filter
     if kernel:
-        before_kernels = [
-            k for k in before_kernels
-            if fnmatch.fnmatch(k.demangled_name, kernel)
-            or fnmatch.fnmatch(k.kernel_name, kernel)
-        ]
-        after_kernels = [
-            k for k in after_kernels
-            if fnmatch.fnmatch(k.demangled_name, kernel)
-            or fnmatch.fnmatch(k.kernel_name, kernel)
-        ]
+        from tachyon.utils.kernel_filter import filter_kernels
+        before_kernels = filter_kernels(before_kernels, kernel)
+        after_kernels = filter_kernels(after_kernels, kernel)
 
     # Diff
     differ = ProfileDiffer()

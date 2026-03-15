@@ -51,15 +51,54 @@ def _mock_subprocess_success(
     returncode: int = 0,
     stderr: str = "",
 ) -> MagicMock:
-    """Build a mock subprocess.run return value and create the output file."""
-    mock_result = MagicMock()
-    mock_result.returncode = returncode
-    mock_result.stderr = stderr
-    mock_result.stdout = ""
+    """Build a mock subprocess.Popen return value and create the output file.
+
+    The mock simulates Popen's interface: stderr is an iterable of lines,
+    stdout.read() returns empty string, wait() does nothing, returncode is set.
+    """
+    mock_proc = MagicMock()
+    mock_proc.returncode = returncode
+    # stderr is iterable of lines (simulating Popen stderr pipe)
+    mock_proc.stderr = iter(stderr.splitlines(keepends=True)) if stderr else iter([])
+    mock_proc.stdout = MagicMock()
+    mock_proc.stdout.read.return_value = ""
+    mock_proc.wait.return_value = None
+    mock_proc.kill.return_value = None
     # Create the output file so the exists() check passes.
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("ncu-rep-binary-content")
-    return mock_result
+    return mock_proc
+
+
+def _mock_popen_failure(
+    returncode: int = 1,
+    stderr: str = "",
+) -> MagicMock:
+    """Build a mock Popen for failure cases (no output file created)."""
+    mock_proc = MagicMock()
+    mock_proc.returncode = returncode
+    mock_proc.stderr = iter(stderr.splitlines(keepends=True)) if stderr else iter([])
+    mock_proc.stdout = MagicMock()
+    mock_proc.stdout.read.return_value = ""
+    mock_proc.wait.return_value = None
+    mock_proc.kill.return_value = None
+    return mock_proc
+
+
+def _mock_popen_timeout() -> MagicMock:
+    """Build a mock Popen that times out on wait(timeout=...) but succeeds on wait() after kill."""
+    mock_proc = MagicMock()
+    mock_proc.returncode = -9
+    mock_proc.stderr = iter([])
+    mock_proc.stdout = MagicMock()
+    mock_proc.stdout.read.return_value = ""
+    mock_proc.kill.return_value = None
+    # First wait(timeout=N) raises TimeoutExpired, second wait() after kill succeeds
+    mock_proc.wait.side_effect = [
+        subprocess.TimeoutExpired(cmd="ncu", timeout=600),
+        None,
+    ]
+    return mock_proc
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━ TestProfilingStrategy ━━━━━━━━━━━━━━━━━
@@ -187,7 +226,7 @@ class TestNcuProfilerBuildCommand:
         assert cmd == [
             FAKE_NCU,
             "--set", "basic",
-            "--output", str(out_file),
+            "--export", str(out_file),
             "--force-overwrite",
             "--target-processes", "all",
             "./app",
@@ -214,7 +253,7 @@ class TestNcuProfilerBuildCommand:
         assert cmd == [
             FAKE_NCU,
             "--set", "full",
-            "--output", str(out_file),
+            "--export", str(out_file),
             "--force-overwrite",
             "--target-processes", "all",
             "--section", "SourceCounters",
@@ -316,6 +355,41 @@ class TestNcuProfilerBuildCommand:
 
         assert sc_idx < kn_idx < extra_idx < exe_idx < arg_idx
 
+    def test_build_command_metrics_override(self, tmp_path: Path) -> None:
+        """metrics_override uses --metrics instead of --set."""
+        profiler, _ = _make_profiler()
+        out_file = tmp_path / "stage1.ncu-rep"
+
+        cmd = profiler._build_command(
+            metric_set="basic",
+            output_path=out_file,
+            executable="./app",
+            exe_args=[],
+            metrics_override="sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed",
+        )
+
+        assert "--metrics" in cmd
+        assert "--set" not in cmd
+        idx = cmd.index("--metrics")
+        assert "sm__throughput" in cmd[idx + 1]
+
+    def test_build_command_metric_set_no_override(self, tmp_path: Path) -> None:
+        """Without metrics_override, --set is used normally."""
+        profiler, _ = _make_profiler()
+        out_file = tmp_path / "stage1.ncu-rep"
+
+        cmd = profiler._build_command(
+            metric_set="detailed",
+            output_path=out_file,
+            executable="./app",
+            exe_args=[],
+        )
+
+        assert "--set" in cmd
+        assert "--metrics" not in cmd
+        idx = cmd.index("--set")
+        assert cmd[idx + 1] == "detailed"
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━ TestNcuProfilerRun ━━━━━━━━━━━━━━━━━━━━
 
@@ -323,13 +397,13 @@ class TestNcuProfilerBuildCommand:
 class TestNcuProfilerRun:
     """Tests for NcuProfiler.profile_basic and profile_targeted (subprocess mocking)."""
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_success(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_success(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """Successful Stage 1 profiling returns ToolResult.ok with ProfilingResult."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage1.ncu-rep"
 
-        mock_run.return_value = _mock_subprocess_success(out_file, returncode=0)
+        mock_popen.return_value = _mock_subprocess_success(out_file, returncode=0)
 
         result = profiler.profile_basic(
             "./app",
@@ -347,7 +421,7 @@ class TestNcuProfilerRun:
         assert pr.elapsed_sec >= 0
 
         # Verify subprocess.run was called with correct basic args
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         assert actual_cmd[0] == FAKE_NCU
         assert "--set" in actual_cmd
         assert "basic" in actual_cmd
@@ -356,11 +430,11 @@ class TestNcuProfilerRun:
         assert "./app" in actual_cmd
         assert "--size" in actual_cmd
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_timeout(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_timeout(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """TimeoutExpired from subprocess returns ToolResult.fail."""
         profiler, _ = _make_profiler()
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ncu", timeout=600)
+        mock_popen.return_value = _mock_popen_timeout()
 
         result = profiler.profile_basic("./app", output_dir=tmp_path)
 
@@ -370,15 +444,13 @@ class TestNcuProfilerRun:
         assert "Stage 1" in result.error.message
         assert "600" in result.error.message
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_ncu_failure(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_ncu_failure(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """Nonzero returncode returns ToolResult.fail with stderr content."""
         profiler, _ = _make_profiler()
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = "CUDA error: no compatible GPU found"
-        mock_result.stdout = ""
-        mock_run.return_value = mock_result
+        mock_popen.return_value = _mock_popen_failure(
+            returncode=1, stderr="CUDA error: no compatible GPU found"
+        )
 
         result = profiler.profile_basic("./app", output_dir=tmp_path)
 
@@ -386,13 +458,13 @@ class TestNcuProfilerRun:
         assert result.error is not None
         assert "failed (exit 1)" in result.error.message
         assert "CUDA error" in result.error.message
-        assert result.error.context.get("stderr") == "CUDA error: no compatible GPU found"
+        assert "CUDA error: no compatible GPU found" in result.error.context.get("stderr", "")
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_ncu_not_found(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_ncu_not_found(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """FileNotFoundError from subprocess returns ToolResult.fail with TOOL_NOT_FOUND."""
         profiler, _ = _make_profiler()
-        mock_run.side_effect = FileNotFoundError("No such file or directory")
+        mock_popen.side_effect = FileNotFoundError("No such file or directory")
 
         result = profiler.profile_basic("./app", output_dir=tmp_path)
 
@@ -402,16 +474,12 @@ class TestNcuProfilerRun:
         assert "not found" in result.error.message
         assert "Install CUDA Toolkit" in result.error.suggestion
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_missing_output(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_missing_output(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """subprocess succeeds but output file does not exist -> ToolResult.fail."""
         profiler, _ = _make_profiler()
         # Return success but do NOT create the output file
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stderr = ""
-        mock_result.stdout = ""
-        mock_run.return_value = mock_result
+        mock_popen.return_value = _mock_popen_failure(returncode=0)
 
         result = profiler.profile_basic("./app", output_dir=tmp_path)
 
@@ -419,16 +487,13 @@ class TestNcuProfilerRun:
         assert result.error is not None
         assert "output file not found" in result.error.message
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_basic_uses_tempdir_when_no_output_dir(
-        self, mock_run: MagicMock
+        self, mock_popen: MagicMock
     ) -> None:
         """When output_dir is None, a temporary directory is created."""
         profiler, _ = _make_profiler()
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stderr = ""
-        mock_run.return_value = mock_result
+        mock_popen.return_value = _mock_popen_failure(returncode=0)
 
         with patch("tachyon.profiler.ncu_profiler.tempfile.mkdtemp") as mock_mkdtemp:
             mock_mkdtemp.return_value = "/tmp/tachyon_abc123"
@@ -437,30 +502,30 @@ class TestNcuProfilerRun:
 
             mock_mkdtemp.assert_called_once_with(prefix="tachyon_")
             # Command should reference the temp dir
-            actual_cmd = mock_run.call_args[0][0]
-            output_idx = actual_cmd.index("--output")
+            actual_cmd = mock_popen.call_args[0][0]
+            output_idx = actual_cmd.index("--export")
             assert "/tmp/tachyon_abc123" in actual_cmd[output_idx + 1]
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_default_args_none(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_default_args_none(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """profile_basic with args=None uses empty list for exe_args."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage1.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         result = profiler.profile_basic("./app", output_dir=tmp_path)
 
         assert result.success is True
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         # Executable should be the last element when no args given
         assert actual_cmd[-1] == "./app"
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_strategy_override(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_strategy_override(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """Explicit strategy parameter overrides config default."""
         profiler, _ = _make_profiler(strategy="conservative")
         out_file = tmp_path / "stage1.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         result = profiler.profile_basic(
             "./app",
@@ -470,16 +535,16 @@ class TestNcuProfilerRun:
 
         assert result.success is True
         # Radical Stage 1 uses "detailed" metric set
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         set_idx = actual_cmd.index("--set")
         assert actual_cmd[set_idx + 1] == "detailed"
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_with_extra_ncu_args(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_with_extra_ncu_args(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """Extra ncu args are passed through to the command."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage1.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         result = profiler.profile_basic(
             "./app",
@@ -489,35 +554,31 @@ class TestNcuProfilerRun:
         )
 
         assert result.success is True
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         assert "--replay-mode" in actual_cmd
         assert "kernel" in actual_cmd
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_subprocess_call_args(self, mock_run: MagicMock, tmp_path: Path) -> None:
-        """Verify subprocess.run is called with capture_output, text, and timeout."""
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_subprocess_call_args(self, mock_popen: MagicMock, tmp_path: Path) -> None:
+        """Verify subprocess.Popen is called with stdout/stderr PIPE and text=True."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage1.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         profiler.profile_basic("./app", output_dir=tmp_path)
 
-        mock_run.assert_called_once()
-        _, kwargs = mock_run.call_args
-        assert kwargs["capture_output"] is True
+        mock_popen.assert_called_once()
+        _, kwargs = mock_popen.call_args
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.PIPE
         assert kwargs["text"] is True
-        assert kwargs["timeout"] == 600  # conservative stage1 default
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_basic_stderr_truncation(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_basic_stderr_truncation(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """Long stderr is truncated to 500 chars in error message."""
         profiler, _ = _make_profiler()
         long_stderr = "X" * 1000
-        mock_result = MagicMock()
-        mock_result.returncode = 2
-        mock_result.stderr = long_stderr
-        mock_result.stdout = ""
-        mock_run.return_value = mock_result
+        mock_popen.return_value = _mock_popen_failure(returncode=2, stderr=long_stderr)
 
         result = profiler.profile_basic("./app", output_dir=tmp_path)
 
@@ -534,14 +595,14 @@ class TestNcuProfilerRun:
 class TestNcuProfilerTargeted:
     """Tests for NcuProfiler.profile_targeted (Stage 2)."""
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_targeted_builds_kernel_filters(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """profile_targeted includes --kernel-name args for each kernel."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         result = profiler.profile_targeted(
             "./app",
@@ -551,7 +612,7 @@ class TestNcuProfilerTargeted:
         )
 
         assert result.success is True
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
 
         # Verify each kernel has a --kernel-name argument
         kernel_name_indices = [
@@ -562,14 +623,14 @@ class TestNcuProfilerTargeted:
         assert actual_cmd[kernel_name_indices[1] + 1] == "reduce_kernel"
         assert actual_cmd[kernel_name_indices[2] + 1] == "softmax_kernel"
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_targeted_stage2_metadata(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """profile_targeted returns stage=2 in ProfilingResult."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         result = profiler.profile_targeted(
             "./app", kernels=["k1"], output_dir=tmp_path
@@ -579,49 +640,46 @@ class TestNcuProfilerTargeted:
         assert result.data.stage == 2
         assert result.data.ncu_rep_path == out_file
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_targeted_uses_stage2_config(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Conservative profile_targeted uses 'detailed' metric set (stage2 config)."""
         profiler, _ = _make_profiler(strategy="conservative")
         out_file = tmp_path / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         profiler.profile_targeted(
             "./app", kernels=["k1"], output_dir=tmp_path
         )
 
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         set_idx = actual_cmd.index("--set")
         assert actual_cmd[set_idx + 1] == "detailed"
-        # Verify timeout for conservative stage2
-        _, kwargs = mock_run.call_args
-        assert kwargs["timeout"] == 1800
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_targeted_radical_has_source_counters(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Radical strategy Stage 2 includes --section SourceCounters."""
         profiler, _ = _make_profiler(strategy="radical")
         out_file = tmp_path / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         profiler.profile_targeted(
             "./app", kernels=["k1"], output_dir=tmp_path
         )
 
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         assert "--section" in actual_cmd
         sc_idx = actual_cmd.index("--section")
         assert actual_cmd[sc_idx + 1] == "SourceCounters"
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_profile_targeted_timeout(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_profile_targeted_timeout(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """TimeoutExpired during Stage 2 returns fail with Stage 2 in message."""
         profiler, _ = _make_profiler()
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ncu", timeout=1800)
+        mock_popen.return_value = _mock_popen_timeout()
 
         result = profiler.profile_targeted(
             "./app", kernels=["k1"], output_dir=tmp_path
@@ -631,14 +689,14 @@ class TestNcuProfilerTargeted:
         assert "Stage 2" in result.error.message
         assert "timed out" in result.error.message
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_targeted_with_extra_ncu_args(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Extra ncu args are inserted in targeted profiling command."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         profiler.profile_targeted(
             "./app",
@@ -647,7 +705,7 @@ class TestNcuProfilerTargeted:
             extra_ncu_args=["--launch-skip", "10"],
         )
 
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         assert "--launch-skip" in actual_cmd
         assert "10" in actual_cmd
         # Extra args come before executable
@@ -655,14 +713,14 @@ class TestNcuProfilerTargeted:
         exe_idx = actual_cmd.index("./app")
         assert skip_idx < exe_idx
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_targeted_strategy_override(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Explicit strategy overrides config default in profile_targeted."""
         profiler, _ = _make_profiler(strategy="conservative")
         out_file = tmp_path / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(out_file)
+        mock_popen.return_value = _mock_subprocess_success(out_file)
 
         profiler.profile_targeted(
             "./app",
@@ -671,22 +729,20 @@ class TestNcuProfilerTargeted:
             strategy=ProfilingStrategy.RADICAL,
         )
 
-        actual_cmd = mock_run.call_args[0][0]
+        actual_cmd = mock_popen.call_args[0][0]
         set_idx = actual_cmd.index("--set")
         # Radical stage2 uses "full"
         assert actual_cmd[set_idx + 1] == "full"
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_targeted_ncu_failure(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Nonzero returncode during stage 2 returns ToolResult.fail."""
         profiler, _ = _make_profiler()
-        mock_result = MagicMock()
-        mock_result.returncode = 127
-        mock_result.stderr = "ncu: command not found"
-        mock_result.stdout = ""
-        mock_run.return_value = mock_result
+        mock_popen.return_value = _mock_popen_failure(
+            returncode=127, stderr="ncu: command not found"
+        )
 
         result = profiler.profile_targeted(
             "./app", kernels=["k1"], output_dir=tmp_path
@@ -778,14 +834,14 @@ class TestProfilingResult:
 class TestEndToEndFlow:
     """Integration-style tests for the two-stage flow within NcuProfiler."""
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
-    def test_two_stage_flow(self, mock_run: MagicMock, tmp_path: Path) -> None:
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
+    def test_two_stage_flow(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """Full two-stage flow: profile_basic then profile_targeted."""
         profiler, _ = _make_profiler()
 
         # Stage 1
         s1_file = tmp_path / "stage1.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(s1_file)
+        mock_popen.return_value = _mock_subprocess_success(s1_file)
         s1_result = profiler.profile_basic("./app", ["--n", "100"], output_dir=tmp_path)
         assert s1_result.success is True
         assert s1_result.data.stage == 1
@@ -794,7 +850,7 @@ class TestEndToEndFlow:
         s2_dir = tmp_path / "stage2_dir"
         s2_dir.mkdir()
         s2_file = s2_dir / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(s2_file)
+        mock_popen.return_value = _mock_subprocess_success(s2_file)
         s2_result = profiler.profile_targeted(
             "./app",
             ["--n", "100"],
@@ -809,26 +865,25 @@ class TestEndToEndFlow:
         _, resolver = _make_profiler()
         # The original resolver from the profiler used in this test
         # was called via ncu_path property, which caches after first call
-        assert mock_run.call_count == 2
+        assert mock_popen.call_count == 2
 
-    @patch("tachyon.profiler.ncu_profiler.subprocess.run")
+    @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_stage1_fail_does_not_prevent_stage2(
-        self, mock_run: MagicMock, tmp_path: Path
+        self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Even if stage 1 fails, stage 2 can still be called independently."""
         profiler, _ = _make_profiler()
 
-        # Stage 1 fails
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="ncu", timeout=600)
+        # Stage 1 fails (timeout)
+        mock_popen.return_value = _mock_popen_timeout()
         s1_result = profiler.profile_basic("./app", output_dir=tmp_path)
         assert s1_result.success is False
 
         # Stage 2 succeeds
-        mock_run.side_effect = None
         s2_dir = tmp_path / "s2"
         s2_dir.mkdir()
         s2_file = s2_dir / "stage2.ncu-rep"
-        mock_run.return_value = _mock_subprocess_success(s2_file)
+        mock_popen.return_value = _mock_subprocess_success(s2_file)
         s2_result = profiler.profile_targeted(
             "./app", kernels=["k1"], output_dir=s2_dir
         )

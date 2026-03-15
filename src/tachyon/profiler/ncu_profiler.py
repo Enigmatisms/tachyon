@@ -106,6 +106,8 @@ class NcuProfiler:
         strategy: ProfilingStrategy | None = None,
         output_dir: Path | None = None,
         extra_ncu_args: list[str] | None = None,
+        metric_set_override: str | None = None,
+        metrics_override: str | None = None,
     ) -> ToolResult[ProfilingResult]:
         """Stage 1: Quick Scan -- profile all kernels with basic/detailed metrics.
 
@@ -118,12 +120,13 @@ class NcuProfiler:
         out_file = out_dir / "stage1.ncu-rep"
 
         cmd = self._build_command(
-            metric_set=stage1_cfg.metric_set,
+            metric_set=metric_set_override or stage1_cfg.metric_set,
             output_path=out_file,
             executable=executable,
             exe_args=args or [],
             source_counters=stage1_cfg.source_counters,
             extra_ncu_args=extra_ncu_args,
+            metrics_override=metrics_override,
         )
 
         return self._run_ncu(cmd, stage=1, output_path=out_file, timeout=stage1_cfg.timeout_sec)
@@ -137,6 +140,8 @@ class NcuProfiler:
         strategy: ProfilingStrategy | None = None,
         output_dir: Path | None = None,
         extra_ncu_args: list[str] | None = None,
+        metric_set_override: str | None = None,
+        metrics_override: str | None = None,
     ) -> ToolResult[ProfilingResult]:
         """Stage 2: Deep Dive -- targeted metrics for top-K kernels only.
 
@@ -155,13 +160,14 @@ class NcuProfiler:
             kernel_filter_args.extend(["--kernel-name", k])
 
         cmd = self._build_command(
-            metric_set=stage2_cfg.metric_set,
+            metric_set=metric_set_override or stage2_cfg.metric_set,
             output_path=out_file,
             executable=executable,
             exe_args=args or [],
             source_counters=stage2_cfg.source_counters,
             kernel_filter_args=kernel_filter_args,
             extra_ncu_args=extra_ncu_args,
+            metrics_override=metrics_override,
         )
 
         return self._run_ncu(cmd, stage=2, output_path=out_file, timeout=stage2_cfg.timeout_sec)
@@ -176,18 +182,24 @@ class NcuProfiler:
         source_counters: bool = False,
         kernel_filter_args: list[str] | None = None,
         extra_ncu_args: list[str] | None = None,
+        metrics_override: str | None = None,
     ) -> list[str]:
         """Build ncu command as a list (never shell=True)."""
-        cmd = [
-            self.ncu_path,
-            "--set",
-            metric_set,
-            "--output",
+        cmd = [self.ncu_path]
+
+        # --metrics takes priority over --set (mutually exclusive in ncu)
+        if metrics_override:
+            cmd.extend(["--metrics", metrics_override])
+        else:
+            cmd.extend(["--set", metric_set])
+
+        cmd.extend([
+            "--export",
             str(output_path),
             "--force-overwrite",
             "--target-processes",
             "all",
-        ]
+        ])
 
         if source_counters:
             cmd.extend(["--section", "SourceCounters"])
@@ -210,18 +222,49 @@ class NcuProfiler:
         output_path: Path,
         timeout: int,
     ) -> ToolResult[ProfilingResult]:
-        """Execute ncu subprocess with safety constraints."""
+        """Execute ncu subprocess with safety constraints.
+
+        NCU progress output (stderr) is streamed to the terminal in real time.
+        """
+        from tachyon.utils.progress import (
+            print_error_panel,
+            print_ncu_line,
+            print_stage_header,
+            print_stage_result,
+        )
+
+        cmd_summary = f"{cmd[0]} ... {cmd[-1]}" if len(cmd) > 2 else " ".join(cmd)
         logger.info("Stage %d: running %s", stage, " ".join(cmd))
+        print_stage_header(stage, cmd_summary)
         start = time.monotonic()
 
+        stderr_lines: list[str] = []
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
             )
+            # Stream stderr in real time (ncu prints progress there)
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                line_stripped = line.rstrip()
+                stderr_lines.append(line_stripped)
+                print_ncu_line(line)
+            proc.wait(timeout=timeout)
+            stdout_text = proc.stdout.read() if proc.stdout else ""
+            returncode = proc.returncode
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            elapsed = time.monotonic() - start
+            print_stage_result(stage, elapsed, success=False)
+            print_error_panel(
+                f"Stage {stage} Timeout",
+                f"ncu timed out after {timeout}s",
+                suggestion=f"Increase timeout or reduce kernel count. Command: {' '.join(cmd[:6])}...",
+            )
             return ToolResult.fail(
                 ErrorCode.UNKNOWN,
                 f"ncu Stage {stage} timed out after {timeout}s",
@@ -231,6 +274,11 @@ class NcuProfiler:
                 ),
             )
         except FileNotFoundError:
+            print_error_panel(
+                "NCU Not Found",
+                f"ncu binary not found at: {cmd[0]}",
+                suggestion="Install CUDA Toolkit or set [tools] ncu_path in config.",
+            )
             return ToolResult.fail(
                 ErrorCode.TOOL_NOT_FOUND,
                 f"ncu binary not found at: {cmd[0]}",
@@ -238,31 +286,41 @@ class NcuProfiler:
             )
 
         elapsed = time.monotonic() - start
+        stderr_text = "\n".join(stderr_lines)
 
-        if result.returncode != 0:
+        if returncode != 0:
+            print_stage_result(stage, elapsed, success=False)
+            print_error_panel(
+                f"Stage {stage} Failed",
+                f"ncu exited with code {returncode}:\n{stderr_text[:300]}",
+                suggestion="Check ncu stderr output above for details.",
+            )
             return ToolResult.fail(
                 ErrorCode.UNKNOWN,
                 (
-                    f"ncu Stage {stage} failed (exit {result.returncode}): "
-                    f"{result.stderr[:500]}"
+                    f"ncu Stage {stage} failed (exit {returncode}): "
+                    f"{stderr_text[:500]}"
                 ),
                 suggestion="Check ncu stderr output for details.",
-                context={"stderr": result.stderr, "cmd": cmd},
+                context={"stderr": stderr_text, "cmd": cmd},
             )
 
         if not output_path.exists():
+            print_stage_result(stage, elapsed, success=False)
             return ToolResult.fail(
                 ErrorCode.UNKNOWN,
                 f"ncu completed but output file not found: {output_path}",
                 suggestion="Check ncu output path and permissions.",
             )
 
+        print_stage_result(stage, elapsed, success=True)
+
         return ToolResult.ok(
             ProfilingResult(
                 ncu_rep_path=output_path,
                 stage=stage,
-                returncode=result.returncode,
-                stderr=result.stderr,
+                returncode=returncode,
+                stderr=stderr_text,
                 elapsed_sec=elapsed,
             )
         )
