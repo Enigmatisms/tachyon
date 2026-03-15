@@ -78,7 +78,7 @@ def analyze(
     # ── Step 1: Load report ──
     from tachyon.reader.ncu_reader import NcuReportReader
 
-    reader = NcuReportReader()
+    reader = NcuReportReader(config)
     result = reader.load(report_path)
     if not result.success:
         click.secho(f"Error: {result.error.message}", fg="red", err=True)

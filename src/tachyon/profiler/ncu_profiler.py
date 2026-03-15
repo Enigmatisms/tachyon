@@ -108,6 +108,7 @@ class NcuProfiler:
         extra_ncu_args: list[str] | None = None,
         metric_set_override: str | None = None,
         metrics_override: str | None = None,
+        verbose: bool = False,
     ) -> ToolResult[ProfilingResult]:
         """Stage 1: Quick Scan -- profile all kernels with basic/detailed metrics.
 
@@ -129,7 +130,10 @@ class NcuProfiler:
             metrics_override=metrics_override,
         )
 
-        return self._run_ncu(cmd, stage=1, output_path=out_file, timeout=stage1_cfg.timeout_sec)
+        return self._run_ncu(
+            cmd, stage=1, output_path=out_file,
+            timeout=stage1_cfg.timeout_sec, verbose=verbose,
+        )
 
     def profile_targeted(
         self,
@@ -142,6 +146,7 @@ class NcuProfiler:
         extra_ncu_args: list[str] | None = None,
         metric_set_override: str | None = None,
         metrics_override: str | None = None,
+        verbose: bool = False,
     ) -> ToolResult[ProfilingResult]:
         """Stage 2: Deep Dive -- targeted metrics for top-K kernels only.
 
@@ -170,7 +175,10 @@ class NcuProfiler:
             metrics_override=metrics_override,
         )
 
-        return self._run_ncu(cmd, stage=2, output_path=out_file, timeout=stage2_cfg.timeout_sec)
+        return self._run_ncu(
+            cmd, stage=2, output_path=out_file,
+            timeout=stage2_cfg.timeout_sec, verbose=verbose,
+        )
 
     def _build_command(
         self,
@@ -221,12 +229,16 @@ class NcuProfiler:
         stage: int,
         output_path: Path,
         timeout: int,
+        verbose: bool = False,
     ) -> ToolResult[ProfilingResult]:
         """Execute ncu subprocess with safety constraints.
 
-        NCU progress output (stderr) is streamed to the terminal in real time.
+        Args:
+            verbose: If True, stream full NCU stderr to terminal.
+                     If False, show a live spinner animation instead.
         """
         from tachyon.utils.progress import (
+            NcuSpinner,
             print_error_panel,
             print_ncu_line,
             print_stage_header,
@@ -238,6 +250,12 @@ class NcuProfiler:
         print_stage_header(stage, cmd_summary)
         start = time.monotonic()
 
+        # Non-verbose mode: spinner animation
+        spinner: NcuSpinner | None = None
+        if not verbose:
+            spinner = NcuSpinner(stage)
+            spinner.start()
+
         stderr_lines: list[str] = []
         try:
             proc = subprocess.Popen(
@@ -246,16 +264,20 @@ class NcuProfiler:
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            # Stream stderr in real time (ncu prints progress there)
             assert proc.stderr is not None
             for line in proc.stderr:
                 line_stripped = line.rstrip()
                 stderr_lines.append(line_stripped)
-                print_ncu_line(line)
+                if verbose:
+                    print_ncu_line(line)
+                elif spinner:
+                    spinner.update(line)
             proc.wait(timeout=timeout)
             stdout_text = proc.stdout.read() if proc.stdout else ""
             returncode = proc.returncode
         except subprocess.TimeoutExpired:
+            if spinner:
+                spinner.stop()
             proc.kill()
             proc.wait()
             elapsed = time.monotonic() - start
@@ -274,6 +296,8 @@ class NcuProfiler:
                 ),
             )
         except FileNotFoundError:
+            if spinner:
+                spinner.stop()
             print_error_panel(
                 "NCU Not Found",
                 f"ncu binary not found at: {cmd[0]}",
@@ -285,6 +309,9 @@ class NcuProfiler:
                 suggestion="Install CUDA Toolkit or set [tools] ncu_path in config.",
             )
 
+        if spinner:
+            spinner.stop()
+
         elapsed = time.monotonic() - start
         stderr_text = "\n".join(stderr_lines)
 
@@ -293,7 +320,9 @@ class NcuProfiler:
             print_error_panel(
                 f"Stage {stage} Failed",
                 f"ncu exited with code {returncode}:\n{stderr_text[:300]}",
-                suggestion="Check ncu stderr output above for details.",
+                suggestion="Check ncu stderr output above for details."
+                if verbose
+                else "Re-run with -v to see full NCU output.",
             )
             return ToolResult.fail(
                 ErrorCode.UNKNOWN,

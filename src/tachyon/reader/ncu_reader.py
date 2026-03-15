@@ -29,15 +29,17 @@ from tachyon.models.kernel import (
 
 logger = logging.getLogger(__name__)
 
-# Well-known installation paths for ncu_report.py, searched in order.
-# Users can override via TACHYON_NCU_REPORT_PATH env var or config.toml [tools].
-_NCU_SEARCH_PATHS = [
-    # Typical Linux system-wide installations
-    "/opt/nvidia/nsight-compute/{version}/extras/python",
-    # CUDA toolkit bundled copy
-    "/usr/local/cuda/nsight-compute/extras/python",
+# Well-known base directories where nsight-compute may be installed.
+# Each entry is (base_dir, version_glob_needed).
+# The discovery logic globs {base_dir}/{version_glob}/extras/python when
+# version_glob_needed is True, or checks {base_dir}/extras/python directly.
+_NCU_SEARCH_BASES: list[tuple[str, bool]] = [
+    # Typical Linux system-wide: /opt/nvidia/nsight-compute/<version>/
+    ("/opt/nvidia/nsight-compute", True),
+    # CUDA toolkit bundled copy (no version subdir)
+    ("/usr/local/cuda/nsight-compute", False),
     # User-local installations
-    "{home}/.local/nvidia/nsight-compute/extras/python",
+    ("{home}/.local/nvidia/nsight-compute", True),
 ]
 
 _NCU_VERSION_GLOBS = ["2025.*", "2024.*", "2023.*"]
@@ -92,21 +94,25 @@ def _discover_ncu_report_path(
         )
 
     # ── Priority 3: well-known paths with version globs ──
-    home = Path.home()
-    for path_template in _NCU_SEARCH_PATHS:
-        for version_glob in _NCU_VERSION_GLOBS:
-            pattern = path_template.format(version=version_glob, home=home)
-            pattern_path = Path(pattern)
-            parent = pattern_path.parent
-            if not parent.exists():
-                continue
-            # Glob on the final component to resolve version wildcards;
-            # reverse sort gives newest version first.
-            for candidate in sorted(
-                parent.glob(pattern_path.name), reverse=True
-            ):
-                if (candidate / "ncu_report.py").exists():
-                    return candidate
+    home = str(Path.home())
+    for base_template, needs_version in _NCU_SEARCH_BASES:
+        base_dir = Path(base_template.format(home=home))
+        if not base_dir.exists():
+            continue
+        if needs_version:
+            # Glob version directories: /opt/nvidia/nsight-compute/2025.*
+            for version_glob in _NCU_VERSION_GLOBS:
+                for ver_dir in sorted(
+                    base_dir.glob(version_glob), reverse=True
+                ):
+                    candidate = ver_dir / "extras" / "python"
+                    if (candidate / "ncu_report.py").exists():
+                        return candidate
+        else:
+            # Direct path: /usr/local/cuda/nsight-compute/extras/python
+            candidate = base_dir / "extras" / "python"
+            if (candidate / "ncu_report.py").exists():
+                return candidate
 
     # ── Priority 4: already importable ──
     try:
@@ -151,15 +157,23 @@ class NcuReportReader:
     and Report layer consumes ``KernelReport`` objects produced here.
     """
 
-    def __init__(self, config_ncu_report_path: str | None = None) -> None:
+    def __init__(self, config: Any = None) -> None:
         """Initialize the reader, discovering and loading ncu_report.
 
         Args:
-            config_ncu_report_path: Optional path from
-                ``TachyonConfig.tools.ncu_report_path``. Passed through
-                to :func:`_load_ncu_module` for priority-2 lookup.
+            config: Optional ``TachyonConfig`` instance or explicit path string.
+                If a ``TachyonConfig``, extracts ``tools.ncu_report_path``.
+                If a string, treated as a direct path to ncu_report.py's directory.
+                Passed through to :func:`_load_ncu_module` for priority-2 lookup.
         """
-        self._ncu = _load_ncu_module(config_path=config_ncu_report_path)
+        config_path: str | None = None
+        if config is not None:
+            # Accept TachyonConfig object — extract the ncu_report_path
+            if hasattr(config, "tools") and hasattr(config.tools, "ncu_report_path"):
+                config_path = config.tools.ncu_report_path
+            elif isinstance(config, str):
+                config_path = config
+        self._ncu = _load_ncu_module(config_path=config_path)
 
     # ------------------------------------------------------------------
     # Public API

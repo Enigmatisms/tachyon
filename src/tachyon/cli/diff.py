@@ -44,10 +44,12 @@ def diff(
     verbose: bool,
 ) -> None:
     """Compare two NCU report files and show metric differences."""
+    from tachyon.config.settings import TachyonConfig
     from tachyon.diff.differ import ProfileDiffer
     from tachyon.reader.ncu_reader import NcuReportReader
 
-    reader = NcuReportReader()
+    config = TachyonConfig.load()
+    reader = NcuReportReader(config)
 
     # Load both reports
     before_result = reader.load(before_path)
@@ -60,7 +62,7 @@ def diff(
         sys.exit(1)
 
     # Need a fresh reader instance for second file
-    reader2 = NcuReportReader()
+    reader2 = NcuReportReader(config)
     after_result = reader2.load(after_path)
     if not after_result.success:
         click.secho(

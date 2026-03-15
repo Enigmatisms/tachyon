@@ -69,6 +69,7 @@ async def run_e2e_pipeline(
             extra_ncu_args=extra_ncu_args,
             metric_set_override=metric_set_override,
             metrics_override=metrics_override,
+            verbose=verbose,
         )
         if not stage1.success:
             return stage1  # type: ignore[return-value]
@@ -84,7 +85,7 @@ async def run_e2e_pipeline(
         # --- Parse Stage 1, find top-K kernels ---
         from tachyon.reader.ncu_reader import NcuReportReader
 
-        reader = NcuReportReader()
+        reader = NcuReportReader(config)
         load_result = reader.load(stage1.data.ncu_rep_path)
         if not load_result.success:
             return load_result  # type: ignore[return-value]
@@ -117,6 +118,7 @@ async def run_e2e_pipeline(
         extra_ncu_args=extra_ncu_args,
         metric_set_override=metric_set_override,
         metrics_override=metrics_override,
+        verbose=verbose,
     )
 
     if not stage2.success:

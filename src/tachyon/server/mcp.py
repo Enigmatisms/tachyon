@@ -45,7 +45,7 @@ class TachyonMCPServer:
         if self._report_path:
             from tachyon.reader.ncu_reader import NcuReportReader
 
-            reader = NcuReportReader()
+            reader = NcuReportReader(self._config)
             result = reader.load(self._report_path)
             if result.success and result.data:
                 kernels = result.data

@@ -190,12 +190,17 @@ def _analyze_report(
 ) -> None:
     """Run the analysis pipeline on a .ncu-rep file."""
     from tachyon.reader.ncu_reader import NcuReportReader
+    from tachyon.utils.progress import console, print_error_panel
 
-    reader = NcuReportReader()
+    reader = NcuReportReader(config)
     load_result = reader.load(report_path)
     if not load_result.success:
         assert load_result.error is not None
-        click.secho(f"Error loading report: {load_result.error.message}", fg="red", err=True)
+        print_error_panel(
+            "Report Load Error",
+            load_result.error.message,
+            suggestion=load_result.error.suggestion,
+        )
         sys.exit(1)
 
     assert load_result.data is not None

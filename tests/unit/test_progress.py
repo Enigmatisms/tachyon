@@ -7,6 +7,7 @@ from unittest.mock import patch
 from rich.console import Console
 
 from tachyon.utils.progress import (
+    NcuSpinner,
     print_error_panel,
     print_ncu_line,
     print_profile_summary,
@@ -125,3 +126,42 @@ class TestPrintProfileSummary:
         )
         assert "full" in output
         assert "override" in output.lower()
+
+
+class TestNcuSpinner:
+
+    def test_spinner_creation(self):
+        spinner = NcuSpinner(1)
+        assert spinner._stage == 1
+
+    def test_spinner_update_percentage(self):
+        spinner = NcuSpinner(1)
+        spinner.update("==PROF== Profiling kernel: 50%")
+        assert "50%" in spinner._status
+
+    def test_spinner_update_connected(self):
+        spinner = NcuSpinner(1)
+        spinner.update("==PROF== Connected to process 12345")
+        assert "Connected" in spinner._status
+
+    def test_spinner_update_disconnected(self):
+        spinner = NcuSpinner(1)
+        spinner.update("==PROF== Disconnected from process")
+        assert "Disconnected" in spinner._status
+
+    def test_spinner_update_empty_line(self):
+        spinner = NcuSpinner(1)
+        original = spinner._status
+        spinner.update("")
+        assert spinner._status == original
+
+    def test_spinner_start_stop(self):
+        """Spinner starts and stops without errors (transient mode)."""
+        buf = StringIO()
+        test_console = Console(file=buf, force_terminal=True, width=120, highlight=False)
+        with patch("tachyon.utils.progress.console", test_console):
+            spinner = NcuSpinner(1)
+            spinner.start()
+            spinner.update("==PROF== Profiling: 25%")
+            spinner.stop()
+        # No assertions on output — just ensure no crash
