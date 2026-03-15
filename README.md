@@ -195,6 +195,18 @@ src/tachyon/
 | [SDK Guide](docs/sdk-guide.md) | Python SDK patterns, common usage, API reference |
 | [Multi-Vendor LLM & Ducc Integration](docs/multi-vendor-integration.md) | LLM switching, Ducc MCP integration, custom providers |
 
+## Preliminary Showcasing [WIP]
+
+Using tachyon to profile [`cuda-pt` (my CUDA path tracing renderer)](https://github.com/Enigmatisms/cuda-pt), the following is generated using `tachyon profile` (end2end) mode, and the Agent API service is provided by MINIMAX-M2.5. The following are some partial screenshots.
+
+![1.png](./assets/1.png)
+
+![2.png](./assets/2.png)
+
+![3.png](./assets/3.png)
+
+![4.png](./assets/4.png)
+
 ## License
 
 MIT

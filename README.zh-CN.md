@@ -195,6 +195,19 @@ src/tachyon/
 | [SDK 使用指南](docs/sdk-guide.md) | Python SDK 接口、常见用法、API 文档 |
 | [多 LLM 后端与 Ducc 集成](docs/multi-vendor-integration.md) | LLM 切换、Ducc MCP 集成、自定义 Provider |
 
+
+## 实际效果 [WIP]
+
+使用 Tachyon 对 [`cuda-pt` (my CUDA path tracing renderer)](https://github.com/Enigmatisms/cuda-pt) 进行 profiling。如下结果展示了使用 `tachyon profile` (端到端模式) 时的部分输出，使用的 Agent API 服务由 MINIMAX-M2.5 提供。下面是部分结果的截图：
+
+![1.png](./assets/1.png)
+
+![2.png](./assets/2.png)
+
+![3.png](./assets/3.png)
+
+![4.png](./assets/4.png)
+
 ## License
 
 MIT
