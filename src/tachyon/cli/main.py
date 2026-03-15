@@ -5,9 +5,29 @@ M1 ships only `analyze`. M3 adds `chat`, M4 adds `profile` and `serve`.
 """
 from __future__ import annotations
 
+import logging
+import os
+
 import click
 
 from tachyon import __version__
+
+
+def _configure_logging() -> None:
+    """Configure logging based on TACHYON_LOG_LEVEL env var.
+
+    Default is WARNING — suppresses httpx INFO, analyzer skip messages, etc.
+    Set TACHYON_LOG_LEVEL=DEBUG for full diagnostics.
+    """
+    level_name = os.environ.get("TACHYON_LOG_LEVEL", "WARNING").upper()
+    level = getattr(logging, level_name, logging.WARNING)
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+    # Always suppress chatty httpx/httpcore regardless
+    logging.getLogger("httpx").setLevel(max(level, logging.WARNING))
+    logging.getLogger("httpcore").setLevel(max(level, logging.WARNING))
+
+
+_configure_logging()
 
 
 @click.group()

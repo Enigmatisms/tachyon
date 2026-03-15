@@ -382,6 +382,7 @@ def try_ai_analysis(
             user_message=user_prompt,
             system_prompt=system_prompt,
             stream=False,
+            timeout=config.llm.timeout,
         ):
             if event.type == "text" and event.content:
                 text_parts.append(event.content)

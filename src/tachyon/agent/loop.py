@@ -6,13 +6,15 @@ Flow:
      a. Call LLM with messages + tool definitions
      b. If tool_calls → execute → append results → continue
      c. If text only → yield → done
-     d. Final turn → force tool_choice="none" for synthesis
+     d. Last 2 turns → force synthesis (no tools)
   3. Yield "done" event with token usage
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -38,7 +40,7 @@ TYPICAL_TURNS = 5
 class AgentEvent:
     """Event yielded by the agent loop.
 
-    Types: "text", "tool_call", "tool_result", "system", "done".
+    Types: "text", "thinking", "tool_call", "tool_result", "system", "done".
     """
     type: str
     content: str | None = None
@@ -62,6 +64,7 @@ async def run_agent_loop(
     history: list[Message] | None = None,
     stream: bool = False,
     context_budget: int = 120_000,
+    timeout: int = 120,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the multi-turn agent loop.
 
@@ -73,12 +76,14 @@ async def run_agent_loop(
         history: Optional conversation history.
         stream: Whether to stream LLM output.
         context_budget: Token budget for context management.
+        timeout: Total timeout in seconds (default 120).
 
     Yields:
         AgentEvent instances for the caller to render.
     """
     ctx = ContextManager(budget=context_budget)
     usage = AgentUsage()
+    t_start = time.monotonic()
 
     messages: list[Message] = [
         Message(role=Role.SYSTEM, content=system_prompt),
@@ -91,6 +96,16 @@ async def run_agent_loop(
 
     for turn in range(MAX_TURNS):
         usage.turns = turn + 1
+
+        # Timeout check
+        elapsed = time.monotonic() - t_start
+        if elapsed > timeout:
+            yield AgentEvent(
+                type="system",
+                content=f"Timeout ({timeout}s) reached after {elapsed:.1f}s. "
+                        f"Returning partial results.",
+            )
+            break
 
         # Context compression after turn 3
         if ctx.should_compact(turn):
@@ -106,34 +121,44 @@ async def run_agent_loop(
         is_synthesis = remaining <= 2 and turn > 0
         is_final = (turn == MAX_TURNS - 1)
 
-        if is_synthesis:
-            # Inject synthesis instruction
-            if remaining == 2:
-                messages.append(Message(
-                    role=Role.USER,
-                    content=(
-                        "You have gathered enough data. Now synthesize your "
-                        "findings into a comprehensive analysis. Do NOT call "
-                        "any more tools — provide your final diagnosis, root "
-                        "causes, and prioritized recommendations based on "
-                        "all the evidence collected above."
-                    ),
-                ))
+        if is_synthesis and remaining == 2:
+            messages.append(Message(
+                role=Role.USER,
+                content=(
+                    "You have gathered enough data. Now synthesize your "
+                    "findings into a comprehensive analysis. Do NOT call "
+                    "any more tools — provide your final diagnosis, root "
+                    "causes, and prioritized recommendations based on "
+                    "all the evidence collected above."
+                ),
+            ))
 
-        # Call LLM
+        # Call LLM with per-turn timing
+        t_turn = time.monotonic()
         try:
-            response = await backend.chat_completion(
-                messages=messages,
-                tools=tool_defs if not is_synthesis else None,
-                tool_choice="none" if is_synthesis else "auto",
-                stream=stream,
-                max_tokens=4096,
-                temperature=0.1,
+            response = await asyncio.wait_for(
+                backend.chat_completion(
+                    messages=messages,
+                    tools=tool_defs if not is_synthesis else None,
+                    tool_choice="none" if is_synthesis else "auto",
+                    stream=stream,
+                    max_tokens=4096,
+                    temperature=0.1,
+                ),
+                timeout=max(timeout - (time.monotonic() - t_start), 5),
             )
+        except asyncio.TimeoutError:
+            yield AgentEvent(
+                type="system",
+                content=f"LLM call timed out after {time.monotonic() - t_turn:.1f}s "
+                        f"(total {time.monotonic() - t_start:.1f}s/{timeout}s).",
+            )
+            break
         except Exception as e:
             yield AgentEvent(type="system", content=f"LLM error: {e}")
-            yield AgentEvent(type="done", data=_usage_dict(usage))
+            yield AgentEvent(type="done", data=_usage_dict(usage, t_start))
             return
+        llm_elapsed = time.monotonic() - t_turn
 
         # Process response
         if stream and isinstance(response, AsyncIterator):
@@ -157,10 +182,14 @@ async def run_agent_loop(
         # No tool calls → final answer
         if not tool_calls:
             if content:
-                yield AgentEvent(type="text", content=content)
+                yield AgentEvent(
+                    type="text",
+                    content=content,
+                    data={"elapsed": round(llm_elapsed, 1)},
+                )
             break
 
-        # Tool calls with accompanying text → yield as "thinking" (not final text)
+        # Tool calls with accompanying text → yield as "thinking"
         messages.append(Message(
             role=Role.ASSISTANT,
             content=content,
@@ -178,7 +207,9 @@ async def run_agent_loop(
                 data={"name": tc.name, "arguments": tc.arguments},
             )
 
+            t_tool = time.monotonic()
             result = await registry.execute(tc.name, tc.arguments)
+            tool_elapsed = time.monotonic() - t_tool
 
             result_str = json.dumps(
                 result.data if result.success else {"error": result.error.message},
@@ -190,7 +221,8 @@ async def run_agent_loop(
                 type="tool_result",
                 content=f"{tc.name}: {'OK' if result.success else 'ERROR'}",
                 data={"name": tc.name, "success": result.success,
-                      "summary": result_str[:200]},
+                      "summary": result_str[:200],
+                      "elapsed": round(tool_elapsed, 2)},
             )
 
             messages.append(Message(
@@ -200,10 +232,18 @@ async def run_agent_loop(
                 name=tc.name,
             ))
 
-        if turn >= TYPICAL_TURNS - 1:
-            _log.debug("Agent at turn %d/%d", turn + 1, MAX_TURNS)
+        # Emit turn timing
+        turn_elapsed = time.monotonic() - t_turn
+        yield AgentEvent(
+            type="system",
+            content=f"Turn {turn + 1}: {turn_elapsed:.1f}s "
+                    f"(LLM {llm_elapsed:.1f}s + {len(tool_calls)} tools)",
+            data={"turn": turn + 1, "elapsed": round(turn_elapsed, 1)},
+        )
 
-    yield AgentEvent(type="done", data=_usage_dict(usage))
+        _log.debug("Agent at turn %d/%d (%.1fs)", turn + 1, MAX_TURNS, turn_elapsed)
+
+    yield AgentEvent(type="done", data=_usage_dict(usage, t_start))
 
 
 def _update_usage(usage: AgentUsage, data: dict) -> None:
@@ -212,15 +252,18 @@ def _update_usage(usage: AgentUsage, data: dict) -> None:
     usage.completion_tokens += data.get("completion_tokens", 0)
 
 
-def _usage_dict(usage: AgentUsage) -> dict:
+def _usage_dict(usage: AgentUsage, t_start: float | None = None) -> dict:
     """Convert AgentUsage to dict for AgentEvent.data."""
-    return {
+    d = {
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.prompt_tokens + usage.completion_tokens,
         "turns": usage.turns,
         "tool_calls": usage.tool_calls,
     }
+    if t_start is not None:
+        d["total_elapsed"] = round(time.monotonic() - t_start, 1)
+    return d
 
 
 async def _collect_stream(

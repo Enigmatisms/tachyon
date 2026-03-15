@@ -139,7 +139,7 @@ def chat(
     )
 
     # Run interactive chat loop
-    asyncio.run(_chat_loop(backend, tool_registry, kernels, verbose))
+    asyncio.run(_chat_loop(backend, tool_registry, kernels, verbose, config.llm.timeout))
 
 
 async def _chat_loop(
@@ -147,6 +147,7 @@ async def _chat_loop(
     tool_registry: ToolRegistry,
     kernels: list,
     verbose: bool,
+    timeout: int = 120,
 ) -> None:
     """Main interactive chat loop."""
     from tachyon.agent.loop import run_agent_loop
@@ -196,20 +197,19 @@ async def _chat_loop(
             registry=tool_registry,
             user_message=user_input,
             system_prompt=system_prompt,
-            history=history[-10:],  # keep last 10 messages for context
+            history=history[-10:],
             stream=False,
+            timeout=timeout,
         ):
             if event.type == "text":
                 text_buffer.append(event.content or "")
             elif event.type == "thinking":
-                # Intermediate LLM text while calling tools — show dimmed
                 if event.content:
                     console.print(f"  [dim italic]{event.content[:120]}[/dim italic]")
             elif event.type == "tool_call":
                 name = event.data["name"] if event.data else "?"
                 args = event.data.get("arguments", {}) if event.data else {}
                 tool_calls_made.append(name)
-                # Always show tool calls — this is key transparency
                 args_short = ", ".join(
                     f"{k}={v}" for k, v in list(args.items())[:3]
                 )
@@ -218,17 +218,24 @@ async def _chat_loop(
                 if event.data:
                     summary = event.data.get("summary", "")
                     ok = "✓" if event.data.get("success") else "✗"
-                    # Show abbreviated result so user sees real data
-                    console.print(f"    [dim]{ok} {summary[:160]}[/dim]")
+                    t = event.data.get("elapsed", 0)
+                    console.print(f"    [dim]{ok} {summary[:140]}  ({t:.2f}s)[/dim]")
+            elif event.type == "system":
+                if event.data and "turn" in event.data:
+                    # Per-turn timing
+                    console.print(f"  [dim]{event.content}[/dim]")
+                elif event.content:
+                    console.print(f"  [yellow]{event.content}[/yellow]")
             elif event.type == "done":
                 if event.data:
                     turns = event.data.get("turns", 0)
                     n_tools = event.data.get("tool_calls", 0)
                     tokens = event.data.get("total_tokens", 0)
+                    total_elapsed = event.data.get("total_elapsed", 0)
                     total_tokens += tokens
                     console.print(
-                        f"  [dim]({turns} turns, {n_tools} tool calls, "
-                        f"{tokens:,} tokens)[/dim]"
+                        f"  [dim]Done: {turns} turns, {n_tools} tool calls, "
+                        f"{tokens:,} tokens, {total_elapsed:.1f}s[/dim]"
                     )
 
         # Render collected text as markdown

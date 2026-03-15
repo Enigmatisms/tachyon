@@ -56,6 +56,7 @@ ncu_report_path = "/opt/nvidia/nsight-compute/2024.3.2/extras/python"
 | `base_url` | string | `null` | 自定义 API 地址，适用于代理、Azure、MiniMax、DeepSeek 或本地端点。 |
 | `max_tokens` | int | `4096` | 单次调用返回的最大 token 数。 |
 | `temperature` | float | `0.1` | 采样温度，值越低输出越确定。 |
+| `timeout` | int | `120` | Agent 总超时（秒）。超时后返回已收集的部分结果。 |
 
 ### [profiling]
 
@@ -116,6 +117,8 @@ ncu_report_path = "/opt/nvidia/nsight-compute/2024.3.2/extras/python"
 | `TACHYON_LANG` | `[output].lang` | 输出语言。 |
 | `TACHYON_STRATEGY` | `[profiling].strategy` | 采集策略。 |
 | `TACHYON_NCU_REPORT_PATH` | `[tools].ncu_report_path` | NCU Python 绑定目录路径。 |
+| `TACHYON_TIMEOUT` | `[llm].timeout` | Agent 总超时（秒），默认 120。 |
+| `TACHYON_LOG_LEVEL` | — | 日志级别：`WARNING`（默认）、`INFO`、`DEBUG`。 |
 
 此外，当 `TACHYON_API_KEY` 未设置时，LLM 的 API Key 从 `api_key_env` 指定的环境变量中读取（默认为 `OPENAI_API_KEY`）。
 

@@ -218,7 +218,7 @@ class AnalyzerRegistry:
                     set(analyzer.required_metrics())
                     - set(report.metrics.keys())
                 )
-                logger.info(
+                logger.debug(
                     "Skipping '%s': missing metrics %s", analyzer.name(), missing
                 )
                 skipped.append(analyzer.name())

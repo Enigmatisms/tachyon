@@ -33,6 +33,7 @@ class LLMConfig:
     base_url: str | None = None
     max_tokens: int = 4096
     temperature: float = 0.1
+    timeout: int = 120                 # agent total timeout in seconds
 
 
 @dataclass
@@ -115,7 +116,18 @@ class TachyonConfig:
         }
         for env_var, (section, attr) in env_map.items():
             if v := os.environ.get(env_var):
-                setattr(getattr(self, section), attr, v)
+                val: Any = v
+                # int coercion for numeric fields
+                if attr == "timeout":
+                    val = int(v)
+                setattr(getattr(self, section), attr, val)
+
+        # TACHYON_TIMEOUT needs special int handling
+        if timeout_str := os.environ.get("TACHYON_TIMEOUT"):
+            try:
+                self.llm.timeout = int(timeout_str)
+            except ValueError:
+                pass
 
         # Auto-detect LLM backend if no explicit config overrides it
         has_explicit = (
