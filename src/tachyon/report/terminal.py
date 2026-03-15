@@ -2,8 +2,9 @@
 
 Layout for each kernel:
 1. Kernel header (name, grid, block, registers, shared mem)
-2. Conclusion box: top 1-5 CRITICAL/WARNING findings with severity badge
-3. Detailed findings table (Sev, Finding, Action, Source columns)
+2. Metrics Overview — key performance indicators at a glance
+3. Key Findings Tree — top CRITICAL/WARNING findings with severity badge
+4. Detailed Findings — each finding with quantitative detail + metrics + action
 
 Uses Rich library: Panel, Table, Tree, Text, Console, with color-coded severity.
 String-buffered output enables both stdout display and --output file writing.
@@ -13,6 +14,7 @@ from __future__ import annotations
 from io import StringIO
 from typing import TYPE_CHECKING
 
+from rich.columns import Columns
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -30,12 +32,21 @@ _SEVERITY_STYLE: dict[str, str] = {
     "info": "dim",
 }
 
-# Severity → Rich markup badge for tree display
+# Severity → Rich markup badge
 _SEVERITY_BADGE: dict[str, str] = {
     "critical": "[red]CRITICAL[/red]",
     "warning": "[yellow]WARNING[/yellow]",
     "info": "[dim]INFO[/dim]",
 }
+
+# Key metrics to show in the overview panel (metric_name → display_label)
+_OVERVIEW_METRICS: list[tuple[str, str, str]] = [
+    ("sm__throughput.avg.pct_of_peak_sustained_elapsed", "SM Throughput", "%"),
+    ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "DRAM Throughput", "%"),
+    ("gpu__time_duration.sum", "Duration", "ns"),
+    ("launch__occupancy_limit_registers", "Occupancy (reg limit)", "%"),
+    ("sm__warps_active.avg.pct_of_peak_sustained_active", "Active Warps", "%"),
+]
 
 
 class TerminalReporter:
@@ -46,14 +57,14 @@ class TerminalReporter:
         reports: list[KernelReport],
         findings_map: dict[str, list[Finding]],
     ) -> str:
-        """Render all kernel reports to a string (for both stdout and file output).
+        """Render all kernel reports to a string.
 
         Args:
             reports: List of KernelReport objects to render.
             findings_map: Mapping from demangled kernel name to its findings.
 
         Returns:
-            Complete rendered string with ANSI escape codes for terminal display.
+            Complete rendered string with ANSI escape codes.
         """
         buf = StringIO()
         console = Console(file=buf, force_terminal=True, width=120)
@@ -71,10 +82,7 @@ class TerminalReporter:
     def render_single_kernel(
         self, report: KernelReport, findings: list[Finding]
     ) -> str:
-        """Convenience: render just one kernel to a string.
-
-        Useful for tests and single-kernel display scenarios.
-        """
+        """Convenience: render just one kernel to a string."""
         buf = StringIO()
         console = Console(file=buf, force_terminal=True, width=120)
         self._render_kernel(console, report, findings)
@@ -83,28 +91,53 @@ class TerminalReporter:
     def _render_kernel(
         self, console: Console, report: KernelReport, findings: list[Finding]
     ) -> None:
-        """Render a single kernel's analysis to the given console.
+        """Render a single kernel's analysis.
 
         Layout:
-        1. Header Panel — kernel name + launch configuration
-        2. Key Findings Tree — top CRITICAL/WARNING (max 5), conclusion-first
-        3. Detailed Findings Table — all findings with severity, action, source
+        1. Header Panel — kernel identity + launch config
+        2. Metrics Overview — key performance numbers
+        3. Key Findings Tree — top CRITICAL/WARNING (max 5)
+        4. Detailed Findings — each with quantitative detail
         """
-        # ── 1. Kernel Header Panel ──
+        # ── 1. Kernel Header ──
+        lp = report.launch_params
         header = (
             f"[bold]{report.demangled_name}[/bold]\n"
-            f"Grid: {report.launch_params.grid} | "
-            f"Block: {report.launch_params.block} | "
-            f"Registers: {report.launch_params.registers_per_thread}/thread | "
-            f"Shared: {report.launch_params.shared_mem_bytes}B"
+            f"Grid: {lp.grid}  Block: {lp.block}  "
+            f"Regs: {lp.registers_per_thread}/thread  "
+            f"Shared: {lp.shared_mem_bytes}B"
         )
-        console.print(Panel(header, title="Kernel", border_style="cyan"))
+        if hasattr(report, 'device_info') and report.device_info:
+            header += f"\nDevice: {report.device_info.name}"
+        console.print(Panel(header, title="[bold cyan]Kernel[/bold cyan]", border_style="cyan"))
+
+        # ── 2. Metrics Overview ──
+        overview_items: list[tuple[str, str]] = []
+        for metric_name, label, unit in _OVERVIEW_METRICS:
+            val = report.metric_value(metric_name)
+            if val is not None:
+                if unit == "%" :
+                    overview_items.append((label, f"{val:.1f}%"))
+                elif unit == "ns" and val > 1e6:
+                    overview_items.append((label, f"{val / 1e6:.2f} ms"))
+                elif unit == "ns" and val > 1e3:
+                    overview_items.append((label, f"{val / 1e3:.1f} us"))
+                else:
+                    overview_items.append((label, f"{val:.1f} {unit}"))
+
+        if overview_items:
+            mtable = Table.grid(padding=(0, 3))
+            mtable.add_column(style="bold cyan")
+            mtable.add_column()
+            for label, val_str in overview_items:
+                mtable.add_row(f"{label}:", val_str)
+            console.print(Panel(mtable, title="[bold]Metrics Overview[/bold]", border_style="dim", expand=False))
 
         if not findings:
             console.print("  [dim]No significant findings.[/dim]\n")
             return
 
-        # ── 2. Conclusion-First: Key Findings Tree ──
+        # ── 3. Key Findings Tree (conclusion-first) ──
         critical_and_warning = [
             f for f in findings if f.severity.value in ("critical", "warning")
         ]
@@ -116,23 +149,60 @@ class TerminalReporter:
             console.print(tree)
             console.print()
 
-        # ── 3. Detailed Findings Table ──
-        table = Table(show_header=True, header_style="bold", expand=True)
-        table.add_column("Sev", width=10, justify="center")
-        table.add_column("Finding", ratio=3)
-        table.add_column("Action", ratio=2)
-        table.add_column("Source", width=20)
+        # ── 4. Detailed Findings ──
+        for i, f in enumerate(findings):
+            self._render_finding(console, f, i + 1)
 
-        for f in findings:
-            style = _SEVERITY_STYLE.get(f.severity.value, "")
-            # Truncate long action text to keep table readable
-            action_text = f.action[:100] + "..." if len(f.action) > 100 else f.action
-            table.add_row(
-                Text(f.severity.value.upper(), style=style),
-                f.title,
-                action_text,
-                f.source,
-            )
+        console.print()
 
-        console.print(table)
+    def _render_finding(
+        self, console: Console, f: Finding, index: int
+    ) -> None:
+        """Render a single finding with full quantitative detail."""
+        style = _SEVERITY_STYLE.get(f.severity.value, "")
+        badge = _SEVERITY_BADGE.get(f.severity.value, f.severity.value)
+
+        # Title line
+        console.print(
+            f"  {badge}  [bold]{f.title}[/bold]",
+            style="" if style == "dim" else "",
+        )
+
+        # Detail (the quantitative narrative — this was previously hidden!)
+        if f.detail:
+            for line in f.detail.split("\n"):
+                console.print(f"    {line}", style="dim" if f.severity.value == "info" else "")
+
+        # Metrics key-values (raw numbers for precision)
+        if f.metrics:
+            parts: list[str] = []
+            for k, v in f.metrics.items():
+                short_name = k.split(".")[-1] if "." in k else k
+                if "pct" in k or k.endswith("_pct"):
+                    parts.append(f"{short_name}={v:.1f}%")
+                elif v > 1e6:
+                    parts.append(f"{short_name}={v:.0f}")
+                elif v == int(v):
+                    parts.append(f"{short_name}={int(v)}")
+                else:
+                    parts.append(f"{short_name}={v:.2f}")
+            console.print(f"    [cyan]Metrics:[/cyan] {', '.join(parts)}")
+
+        # Source location (M2)
+        if f.source_location:
+            loc = f.source_location
+            loc_str = f"{loc.file}:{loc.line}"
+            if loc.function:
+                loc_str += f" ({loc.function})"
+            console.print(f"    [dim]Source:[/dim] {loc_str}")
+
+        # SASS evidence (M2)
+        if f.sass_evidence:
+            console.print(f"    [dim]SASS:[/dim] {f.sass_evidence}")
+
+        # Action
+        if f.action:
+            console.print(f"    [green]Action:[/green] {f.action}")
+
+        console.print(f"    [dim]Analyzer: {f.source}[/dim]")
         console.print()

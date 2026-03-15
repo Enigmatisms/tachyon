@@ -116,8 +116,20 @@ class TestOccupancyAnalyzer:
     def test_required_metrics(self):
         from tachyon.analyzers.occupancy import OccupancyAnalyzer
         metrics = OccupancyAnalyzer().required_metrics()
-        assert len(metrics) == 5
-        assert "sm__warps_active.avg.pct_of_peak_sustained_active" in metrics
+        # No required metrics — graceful degradation from launch_params
+        assert len(metrics) == 0
+
+    def test_always_can_run(self):
+        """OccupancyAnalyzer always runs (uses launch_params, not just metrics)."""
+        from tachyon.analyzers.occupancy import OccupancyAnalyzer
+        from tachyon.models.kernel import DeviceInfo, KernelReport, LaunchParams
+        minimal = KernelReport(
+            kernel_name="k", demangled_name="k",
+            launch_params=LaunchParams(grid=(1,1,1), block=(256,1,1),
+                                       shared_mem_bytes=0, registers_per_thread=32),
+            device_info=_device(), metrics={},
+        )
+        assert OccupancyAnalyzer().can_run(minimal)
 
     def test_low_occupancy_warning(self):
         """Achieved occupancy below 50% should produce a WARNING."""
@@ -200,8 +212,8 @@ class TestOccupancyAnalyzer:
         assert len(low_findings) == 0
         assert len(healthy) == 0
 
-    def test_cannot_run_missing_metrics(self):
-        """Should not run when required metrics are missing."""
+    def test_runs_with_no_metrics(self):
+        """Should run even with no metrics (uses launch_params for register/smem checks)."""
         from tachyon.analyzers.occupancy import OccupancyAnalyzer
         report = KernelReport(
             kernel_name="k",
@@ -213,7 +225,10 @@ class TestOccupancyAnalyzer:
             device_info=_device(),
             metrics={},
         )
-        assert not OccupancyAnalyzer().can_run(report)
+        assert OccupancyAnalyzer().can_run(report)
+        # Should not crash, may produce no findings with normal regs
+        findings = OccupancyAnalyzer().analyze(report)
+        assert isinstance(findings, list)
 
     def test_combined_low_occupancy_and_register_pressure(self):
         """Both low occupancy AND high register pressure should produce 2 findings."""

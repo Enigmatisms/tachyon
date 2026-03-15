@@ -14,7 +14,7 @@ class TestFullPipeline:
 
         reporter = TerminalReporter()
         output = reporter.render_single_kernel(report_compute_bound, findings)
-        assert "compute-bound" in output
+        assert "COMPUTE-BOUND" in output
         assert len(output) > 100
 
     def test_memory_bound_pipeline(self, report_memory_bound: KernelReport):
@@ -28,7 +28,7 @@ class TestFullPipeline:
 
         reporter = TerminalReporter()
         output = reporter.render_single_kernel(report_memory_bound, findings)
-        assert "memory-bound" in output or "memory" in output.lower()
+        assert "MEMORY-BOUND" in output or "memory" in output.lower()
         assert len(output) > 100
 
     def test_latency_bound_pipeline(self, report_latency_bound: KernelReport):
@@ -92,7 +92,7 @@ class TestFullPipeline:
     def test_with_nvrules(self, report_with_rules: KernelReport):
         """Pipeline includes NvRules findings."""
         registry = AnalyzerRegistry()
-        registry.auto_register()
+        registry.auto_register(include_nvrules=True)
         findings = registry.run_all(report_with_rules)
 
         nvrule_findings = [f for f in findings if f.source == "nvrules"]

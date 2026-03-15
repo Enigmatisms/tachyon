@@ -141,7 +141,7 @@ def create_backend(
             return OpenAIBackend(model=model, api_key=api_key, base_url=base_url, **kwargs)
         case "anthropic":
             from .anthropic_backend import AnthropicBackend
-            return AnthropicBackend(model=model, api_key=api_key, **kwargs)
+            return AnthropicBackend(model=model, api_key=api_key, base_url=base_url, **kwargs)
         case "litellm":
             from .litellm_backend import LiteLLMBackend
             return LiteLLMBackend(model=model, api_key=api_key, base_url=base_url, **kwargs)

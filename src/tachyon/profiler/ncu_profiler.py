@@ -45,10 +45,16 @@ class StageConfig:
 
 
 # Strategy -> (Stage1, Stage2) configurations.
+# Conservative: Stage1 basic (quick scan) → Stage2 detailed + extra sections
+# Radical: Stage1 detailed → Stage2 full + SourceCounters
 STRATEGY_CONFIGS: dict[ProfilingStrategy, tuple[StageConfig, StageConfig]] = {
     ProfilingStrategy.CONSERVATIVE: (
         StageConfig(metric_set="basic", timeout_sec=600),
-        StageConfig(metric_set="detailed", timeout_sec=1800),
+        StageConfig(
+            metric_set="detailed",
+            timeout_sec=1800,
+            extra_sections=["InstructionStats"],
+        ),
     ),
     ProfilingStrategy.RADICAL: (
         StageConfig(metric_set="detailed", timeout_sec=1200),
@@ -126,6 +132,7 @@ class NcuProfiler:
             executable=executable,
             exe_args=args or [],
             source_counters=stage1_cfg.source_counters,
+            extra_sections=stage1_cfg.extra_sections or None,
             extra_ncu_args=extra_ncu_args,
             metrics_override=metrics_override,
         )
@@ -170,6 +177,7 @@ class NcuProfiler:
             executable=executable,
             exe_args=args or [],
             source_counters=stage2_cfg.source_counters,
+            extra_sections=stage2_cfg.extra_sections or None,
             kernel_filter_args=kernel_filter_args,
             extra_ncu_args=extra_ncu_args,
             metrics_override=metrics_override,
@@ -188,6 +196,7 @@ class NcuProfiler:
         executable: str,
         exe_args: list[str],
         source_counters: bool = False,
+        extra_sections: list[str] | None = None,
         kernel_filter_args: list[str] | None = None,
         extra_ncu_args: list[str] | None = None,
         metrics_override: str | None = None,
@@ -211,6 +220,10 @@ class NcuProfiler:
 
         if source_counters:
             cmd.extend(["--section", "SourceCounters"])
+
+        if extra_sections:
+            for section in extra_sections:
+                cmd.extend(["--section", section])
 
         if kernel_filter_args:
             cmd.extend(kernel_filter_args)

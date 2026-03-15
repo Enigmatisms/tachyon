@@ -36,13 +36,18 @@ logger = logging.getLogger(__name__)
 _NCU_SEARCH_BASES: list[tuple[str, bool]] = [
     # Typical Linux system-wide: /opt/nvidia/nsight-compute/<version>/
     ("/opt/nvidia/nsight-compute", True),
-    # CUDA toolkit bundled copy (no version subdir)
+    # CUDA toolkit bundled (no version subdir)
     ("/usr/local/cuda/nsight-compute", False),
+    # CUDA toolkit bundled (with version subdir)
+    ("/usr/local/cuda/nsight-compute", True),
+    # Multi-CUDA: /usr/local/cuda-12.x/nsight-compute/<version>/
+    ("/usr/local/cuda-{cuda_ver}/nsight-compute", True),
     # User-local installations
     ("{home}/.local/nvidia/nsight-compute", True),
 ]
 
 _NCU_VERSION_GLOBS = ["2025.*", "2024.*", "2023.*"]
+_CUDA_VERSION_GLOBS = ["12.*", "11.*"]
 
 
 def _resolve_path_arg(raw: str) -> Path | None:
@@ -96,23 +101,40 @@ def _discover_ncu_report_path(
     # ── Priority 3: well-known paths with version globs ──
     home = str(Path.home())
     for base_template, needs_version in _NCU_SEARCH_BASES:
-        base_dir = Path(base_template.format(home=home))
-        if not base_dir.exists():
-            continue
-        if needs_version:
-            # Glob version directories: /opt/nvidia/nsight-compute/2025.*
-            for version_glob in _NCU_VERSION_GLOBS:
-                for ver_dir in sorted(
-                    base_dir.glob(version_glob), reverse=True
-                ):
-                    candidate = ver_dir / "extras" / "python"
-                    if (candidate / "ncu_report.py").exists():
-                        return candidate
+        # Expand {cuda_ver} templates into multiple concrete bases
+        if "{cuda_ver}" in base_template:
+            bases: list[Path] = []
+            parent = Path(base_template.split("{cuda_ver}")[0].rstrip("/")).parent
+            if parent.exists():
+                for cuda_glob in _CUDA_VERSION_GLOBS:
+                    expanded = base_template.format(home=home, cuda_ver=cuda_glob)
+                    bases.extend(sorted(parent.glob(Path(expanded).name + "/nsight-compute"), reverse=True))
+            # De-duplicate while preserving order
+            seen: set[str] = set()
+            unique_bases: list[Path] = []
+            for b in bases:
+                if str(b) not in seen:
+                    seen.add(str(b))
+                    unique_bases.append(b)
+            bases = unique_bases
         else:
-            # Direct path: /usr/local/cuda/nsight-compute/extras/python
-            candidate = base_dir / "extras" / "python"
-            if (candidate / "ncu_report.py").exists():
-                return candidate
+            bases = [Path(base_template.format(home=home))]
+
+        for base_dir in bases:
+            if not base_dir.exists():
+                continue
+            if needs_version:
+                for version_glob in _NCU_VERSION_GLOBS:
+                    for ver_dir in sorted(
+                        base_dir.glob(version_glob), reverse=True
+                    ):
+                        candidate = ver_dir / "extras" / "python"
+                        if (candidate / "ncu_report.py").exists():
+                            return candidate
+            else:
+                candidate = base_dir / "extras" / "python"
+                if (candidate / "ncu_report.py").exists():
+                    return candidate
 
     # ── Priority 4: already importable ──
     try:
@@ -355,8 +377,11 @@ class NcuReportReader:
         """Extract all scalar (non-instanced) metrics from the action.
 
         Iterates over every available metric name and captures those with
-        scalar values.  Instanced metrics (per-PC, ``num_instances > 1``)
-        are handled separately by :meth:`_extract_instanced_metrics`.
+        scalar values.  For metrics with multiple instances (e.g. DRAM
+        throughput has per-partition instances), the aggregate rollup value
+        (``as_double()`` without instance index) is still captured as a
+        scalar.  True per-PC instanced metrics are *also* handled by
+        :meth:`_extract_instanced_metrics` for source-level attribution.
         """
         metrics: dict[str, MetricValue] = {}
         try:
@@ -364,14 +389,28 @@ class NcuReportReader:
         except (AttributeError, RuntimeError):
             return metrics
 
+        # Prefixes that are truly per-PC and should ONLY go through
+        # _extract_instanced_metrics (not stored as scalars).
+        _PER_PC_PREFIXES = (
+            "smsp__pcsamp_warps_issue_stalled_",
+            "inst_executed",
+            "thread_inst_executed",
+        )
+
         for name in metric_names:
             try:
                 m = action.metric_by_name(name)
                 if m is None or not m.has_value():
                     continue
-                # Skip instanced metrics -- they go to _extract_instanced_metrics
-                if m.num_instances() > 1:
+
+                # True per-PC metrics: skip here, handled by _extract_instanced_metrics
+                if m.num_instances() > 1 and any(
+                    name.startswith(p) for p in _PER_PC_PREFIXES
+                ):
                     continue
+
+                # For all other metrics (including multi-instance aggregates
+                # like dram__throughput), as_double() returns the rollup value.
                 metrics[name] = MetricValue(
                     name=name,
                     value=m.as_double(),
@@ -490,6 +529,8 @@ class NcuReportReader:
         """
         if "pct" in metric_name:
             return "%"
+        if "time_duration" in metric_name or "time_active" in metric_name:
+            return "ns"
         if metric_name.endswith(".sum") or metric_name.endswith(".avg"):
             if "bytes" in metric_name:
                 return "byte"

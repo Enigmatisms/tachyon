@@ -143,16 +143,22 @@ class AnalyzerRegistry:
         self._analyzers.append(analyzer)
         logger.debug("Registered analyzer: %s", analyzer.name())
 
-    def auto_register(self) -> None:
+    def auto_register(self, include_nvrules: bool = False) -> None:
         """Import and register all built-in analyzers.
 
         Import here (not at module level) to avoid circular imports and
         to make registration explicit and testable.
+
+        Args:
+            include_nvrules: If True, also register NvRulesAdapter which
+                converts NCU built-in rule results into Findings. Disabled
+                by default because the built-in analyzers cover the same
+                domains with richer quantitative detail. Enable when you
+                want raw NCU rule output (e.g. for debugging or comparison).
         """
         from tachyon.analyzers.instruction import InstructionAnalyzer
         from tachyon.analyzers.launch import LaunchConfigAnalyzer
         from tachyon.analyzers.memory import MemoryAnalyzer
-        from tachyon.analyzers.nvrules import NvRulesAdapter
         from tachyon.analyzers.occupancy import OccupancyAnalyzer
         from tachyon.analyzers.roofline import RooflineAnalyzer
         from tachyon.analyzers.warp_stall import WarpStallAnalyzer
@@ -161,12 +167,15 @@ class AnalyzerRegistry:
             RooflineAnalyzer,
             MemoryAnalyzer,
             WarpStallAnalyzer,
-            NvRulesAdapter,
             OccupancyAnalyzer,
             InstructionAnalyzer,
             LaunchConfigAnalyzer,
         ]:
             self.register(cls())
+
+        if include_nvrules:
+            from tachyon.analyzers.nvrules import NvRulesAdapter
+            self.register(NvRulesAdapter())
 
     def all_analyzers(self) -> list[Analyzer]:
         """Return a copy of the registered analyzer list."""
@@ -201,6 +210,7 @@ class AnalyzerRegistry:
                 )
 
         findings: list[Finding] = []
+        skipped: list[str] = []
 
         for analyzer in self._analyzers:
             if not analyzer.can_run(report):
@@ -211,6 +221,7 @@ class AnalyzerRegistry:
                 logger.info(
                     "Skipping '%s': missing metrics %s", analyzer.name(), missing
                 )
+                skipped.append(analyzer.name())
                 continue
 
             # M2: inject correlator + hotspots before analyze()
@@ -235,6 +246,28 @@ class AnalyzerRegistry:
                     source=analyzer.name(),
                     category=analyzer.category(),
                 ))
+
+        # Add user-visible diagnostic when analyzers were skipped
+        if skipped:
+            total = len(self._analyzers)
+            ran = total - len(skipped)
+            skipped_list = ", ".join(skipped)
+            findings.append(Finding(
+                severity=Severity.INFO,
+                title=f"Metric coverage: {ran}/{total} analyzers ran ({len(skipped)} skipped)",
+                detail=(
+                    f"Skipped analyzers: {skipped_list}. "
+                    "These analyzers require NCU metrics not present in the report. "
+                    "The current profiling set may not include the required sections."
+                ),
+                action=(
+                    "Re-profile with `--ncu-set detailed` (or `--ncu-set full`) to "
+                    "collect all metrics. For example: "
+                    "`tachyon profile --ncu-set full ./app`"
+                ),
+                source="registry",
+                category="diagnostic",
+            ))
 
         # Sort: CRITICAL > WARNING > INFO
         findings.sort(key=lambda f: f.severity, reverse=True)

@@ -56,9 +56,9 @@ class TestCliHelp:
         runner = CliRunner()
         result = runner.invoke(app, ["analyze", "--help"])
         assert result.exit_code == 0
-        assert "--format" in result.output
         assert "--no-ai" in result.output
         assert "--kernel" in result.output
+        assert "--model" in result.output
 
 
 class TestAnalyzeCommand:

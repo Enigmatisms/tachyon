@@ -146,7 +146,7 @@ class TestM2Pipeline:
         )
 
         # Findings should classify as compute-bound
-        assert any("compute-bound" in f.title for f in findings)
+        assert any("COMPUTE-BOUND" in f.title for f in findings)
 
         # Markdown output should contain all major sections
         assert "Executive Summary" in markdown
@@ -210,7 +210,7 @@ class TestM2Pipeline:
         )
 
         # Should classify as latency-bound
-        assert any("latency-bound" in f.title for f in findings)
+        assert any("LATENCY-BOUND" in f.title for f in findings)
 
         # OptTree: the latency branch should be active (not pruned)
         latency_branches = [
@@ -239,7 +239,7 @@ class TestM2Pipeline:
 
         # Findings should still be generated from rule-based analysis
         assert len(findings) > 0
-        assert any("compute-bound" in f.title for f in findings)
+        assert any("COMPUTE-BOUND" in f.title for f in findings)
 
         # No hotspots in M1 mode
         assert hotspots == []

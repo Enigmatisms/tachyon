@@ -86,13 +86,13 @@ class TestTerminalReporter:
         assert "256" in output   # block size
         assert "32" in output    # registers
 
-    def test_long_action_truncated(self, report_compute_bound: KernelReport):
-        """Very long action text should be truncated."""
+    def test_long_action_rendered(self, report_compute_bound: KernelReport):
+        """Very long action text should still be included in output."""
         findings = [
             Finding(severity=Severity.WARNING, title="Test",
                     detail="d", action="A" * 200, source="s"),
         ]
         reporter = TerminalReporter()
         output = reporter.render_single_kernel(report_compute_bound, findings)
-        # Should have truncated with "..." or ellipsis "…"
-        assert "..." in output or "\u2026" in output
+        # Action text should appear in the output
+        assert "AAAA" in output

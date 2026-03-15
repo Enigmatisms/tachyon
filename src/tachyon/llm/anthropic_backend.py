@@ -132,6 +132,16 @@ class AnthropicBackend(LLMBackend):
         if base_url is not None:
             client_kwargs["base_url"] = base_url
 
+        # Support ducc environment: inject custom headers from env
+        import os
+        custom_headers_env = os.environ.get("ANTHROPIC_CUSTOM_HEADERS")
+        if custom_headers_env:
+            # Format: "key:value" — parse and inject as default_headers
+            parts = custom_headers_env.split(":", 1)
+            if len(parts) == 2:
+                client_kwargs.setdefault("default_headers", {})
+                client_kwargs["default_headers"][parts[0]] = parts[1]
+
         self._client = anthropic.AsyncAnthropic(**client_kwargs)
         self._anthropic = anthropic  # keep module reference for type checks
 

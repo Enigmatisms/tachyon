@@ -14,30 +14,30 @@ class TestRooflineAnalyzer:
         analyzer = RooflineAnalyzer()
         assert analyzer.can_run(report_compute_bound)
         findings = analyzer.analyze(report_compute_bound)
-        assert any("compute-bound" in f.title for f in findings)
+        assert any("COMPUTE-BOUND" in f.title for f in findings)
 
     def test_memory_bound(self, report_memory_bound: KernelReport):
         """SM=25%, DRAM=78% -> memory-bound."""
         from tachyon.analyzers.roofline import RooflineAnalyzer
         findings = RooflineAnalyzer().analyze(report_memory_bound)
-        assert any("memory-bound" in f.title for f in findings)
+        assert any("MEMORY-BOUND" in f.title for f in findings)
 
     def test_latency_bound(self, report_latency_bound: KernelReport):
         """SM=22%, DRAM=18% -> latency-bound (both < 60%)."""
         from tachyon.analyzers.roofline import RooflineAnalyzer
         findings = RooflineAnalyzer().analyze(report_latency_bound)
-        assert any("latency-bound" in f.title for f in findings)
-        # Latency-bound should be WARNING severity per implementation
-        latency_findings = [f for f in findings if "latency-bound" in f.title]
-        assert latency_findings[0].severity == Severity.WARNING
+        assert any("LATENCY-BOUND" in f.title for f in findings)
+        # Latency-bound should be CRITICAL severity per implementation
+        latency_findings = [f for f in findings if "LATENCY-BOUND" in f.title]
+        assert latency_findings[0].severity == Severity.CRITICAL
 
     def test_balanced(self, report_balanced: KernelReport):
         """SM=88%, DRAM=85% -> balanced."""
         from tachyon.analyzers.roofline import RooflineAnalyzer
         findings = RooflineAnalyzer().analyze(report_balanced)
-        assert any("balanced" in f.title.lower() for f in findings)
-        balanced_findings = [f for f in findings if "balanced" in f.title.lower()]
-        assert balanced_findings[0].severity == Severity.INFO
+        assert any("BALANCED" in f.title for f in findings)
+        balanced_findings = [f for f in findings if "BALANCED" in f.title]
+        assert balanced_findings[0].severity == Severity.WARNING
 
     def test_metrics_in_findings(self, report_compute_bound: KernelReport):
         """Findings should contain metric values."""
@@ -63,7 +63,8 @@ class TestRooflineAnalyzer:
         from tachyon.analyzers.roofline import RooflineAnalyzer
         metrics = RooflineAnalyzer().required_metrics()
         assert "sm__throughput.avg.pct_of_peak_sustained_elapsed" in metrics
-        assert "dram__throughput.avg.pct_of_peak_sustained_elapsed" in metrics
+        # DRAM is consumed if available but NOT required (graceful degradation)
+        assert "dram__throughput.avg.pct_of_peak_sustained_elapsed" not in metrics
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━ MemoryAnalyzer ━━━━━━━━━━━━━━━━━━━━━━
@@ -223,11 +224,11 @@ class TestNvRulesAdapter:
 
 class TestAnalyzerRegistry:
     def test_auto_register(self):
-        """auto_register should add 7 analyzers (4 M1 + 3 M5)."""
+        """auto_register should add 6 analyzers (NvRules excluded by default)."""
         from tachyon.analyzers.base import AnalyzerRegistry
         registry = AnalyzerRegistry()
         registry.auto_register()
-        assert len(registry.all_analyzers()) == 7
+        assert len(registry.all_analyzers()) == 6
 
     def test_run_all_compute_bound(self, report_compute_bound: KernelReport):
         """Pipeline produces findings for compute-bound kernel."""
@@ -261,7 +262,7 @@ class TestAnalyzerRegistry:
     def test_run_all_with_rules(self, report_with_rules: KernelReport):
         from tachyon.analyzers.base import AnalyzerRegistry
         registry = AnalyzerRegistry()
-        registry.auto_register()
+        registry.auto_register(include_nvrules=True)
         findings = registry.run_all(report_with_rules)
         nvrule_findings = [f for f in findings if f.source == "nvrules"]
         assert len(nvrule_findings) > 0

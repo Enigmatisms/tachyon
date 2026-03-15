@@ -279,7 +279,11 @@ def _load_report(report_file: str, config: TachyonConfig) -> list:
     try:
         from tachyon.reader.ncu_reader import NcuReportReader
         reader = NcuReportReader(config)
-        return reader.load(report_file)
+        result = reader.load(report_file)
+        if result.success and result.data is not None:
+            return result.data
+        console.print(f"[red]Failed to load report: {result.error}[/red]")
+        return []
     except Exception as e:
         console.print(f"[red]Failed to load report: {e}[/red]")
         return []

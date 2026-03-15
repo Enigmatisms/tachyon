@@ -18,8 +18,9 @@ class TestDefaultConfig:
         assert cfg.output.format == "terminal"
         assert cfg.tools.ncu_path is None
 
+    @patch.dict(os.environ, {}, clear=True)
     def test_load_no_file(self, tmp_path: Path):
-        """Load with nonexistent config file returns defaults."""
+        """Load with nonexistent config file returns defaults (clean env)."""
         cfg = TachyonConfig.load(tmp_path / "nonexistent.toml")
         assert cfg.llm.provider == "openai"
         assert cfg.output.format == "terminal"

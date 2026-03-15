@@ -1,7 +1,9 @@
-"""End-to-end profiling pipeline.
+"""Two-stage NCU profiling pipeline.
 
-Orchestrates: NcuProfiler -> NcuReportReader -> Analyzers -> OptTree -> Report.
-Optionally invokes Agent for AI-enhanced analysis.
+Orchestrates: NcuProfiler Stage 1 (Quick Scan) → top-K selection → Stage 2 (Deep Dive).
+
+This module is **profiling only** — it returns the .ncu-rep path for downstream
+analysis. Analysis (Rule Engine + AI) is handled by ``tachyon.analysis.pipeline``.
 
 References:
   - Implementation: section 4.2 (E2E Pipeline)
@@ -21,7 +23,7 @@ from tachyon.profiler.tool_path import ToolPathResolver
 logger = logging.getLogger(__name__)
 
 
-async def run_e2e_pipeline(
+async def run_profiling_pipeline(
     executable: str,
     exe_args: list[str],
     *,
@@ -29,32 +31,28 @@ async def run_e2e_pipeline(
     strategy: ProfilingStrategy | None = None,
     top_k: int = 5,
     kernel_filter: list[str] | None = None,
-    use_ai: bool = True,
     output_dir: Path | None = None,
     extra_ncu_args: list[str] | None = None,
     metric_set_override: str | None = None,
     metrics_override: str | None = None,
     verbose: bool = False,
 ) -> ToolResult[Path]:
-    """Full profile -> analyze -> report pipeline.
+    """Two-stage smart profiling: Quick Scan → identify top-K → Deep Dive.
 
     Steps:
-      1. Stage 1: Quick Scan (NcuProfiler.profile_basic)
-      2. Parse Stage 1 report (NcuReportReader) -> identify top-K kernels
-      3. Stage 2: Deep Dive on top-K (NcuProfiler.profile_targeted)
-      4. Parse Stage 2 report -> full analysis pipeline
-      5. (Optional) Agent-enhanced analysis
-      6. Generate report
+      1. Stage 1: Quick Scan (all kernels, basic/detailed metrics)
+      2. Parse Stage 1 → rank kernels by duration → select top-K
+      3. Stage 2: Deep Dive (top-K kernels, detailed/full metrics)
+
+    If ``kernel_filter`` is specified, Stage 1 is skipped entirely.
 
     Returns:
-        ToolResult wrapping the final report path (the .ncu-rep used for analysis).
+        ToolResult wrapping the final .ncu-rep path for downstream analysis.
     """
     resolver = ToolPathResolver(config)
     profiler = NcuProfiler(config, resolver)
 
     # --- Stage 1: Quick Scan ---
-    # If user explicitly specified kernel_filter, skip Stage 1 entirely —
-    # no need to scan all kernels just to discover top-K.
     if kernel_filter:
         logger.info("Kernel filter specified, skipping Stage 1 quick scan.")
         kernel_names = kernel_filter
@@ -82,7 +80,7 @@ async def run_e2e_pipeline(
             stage1.data.elapsed_sec,
         )
 
-        # --- Parse Stage 1, find top-K kernels ---
+        # Parse Stage 1, find top-K kernels
         from tachyon.reader.ncu_reader import NcuReportReader
 
         reader = NcuReportReader(config)
@@ -93,9 +91,7 @@ async def run_e2e_pipeline(
         assert load_result.data is not None
         kernels = load_result.data
 
-        # Sort by duration (if available) or SM throughput, pick top-K.
         def _sort_key(k: Any) -> float:
-            """Sort kernels by duration, falling back to SM throughput."""
             dur = k.metrics.get("gpu__time_duration.sum")
             if dur:
                 return dur.value
@@ -124,11 +120,12 @@ async def run_e2e_pipeline(
     if not stage2.success:
         assert stage2.error is not None
         if stage1_data is not None:
-            # Fallback: use Stage 1 data for analysis (degraded but functional).
-            logger.warning("Stage 2 failed, falling back to Stage 1 data: %s", stage2.error.message)
+            logger.warning(
+                "Stage 2 failed, falling back to Stage 1 data: %s",
+                stage2.error.message,
+            )
             report_path = stage1_data.ncu_rep_path
         else:
-            # No Stage 1 data (kernel_filter mode skipped it), propagate error.
             return stage2  # type: ignore[return-value]
     else:
         assert stage2.data is not None
@@ -140,3 +137,7 @@ async def run_e2e_pipeline(
         )
 
     return ToolResult.ok(report_path)
+
+
+# Backward compatibility alias
+run_e2e_pipeline = run_profiling_pipeline
