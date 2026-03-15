@@ -19,7 +19,8 @@ Tachyon 采用分层配置机制，多个来源的配置按以下优先级合并
 [llm]
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
-api_key_env = "ANTHROPIC_API_KEY"
+api_key = ""                          # 直接填 Key（优先级最高），留空则从 api_key_env 读
+api_key_env = "ANTHROPIC_API_KEY"     # 存放 Key 的环境变量名
 base_url = ""
 max_tokens = 4096
 temperature = 0.1
@@ -50,8 +51,9 @@ ncu_report_path = "/opt/nvidia/nsight-compute/2024.3.2/extras/python"
 |-----|------|---------|------|
 | `provider` | string | `"openai"` | 模型提供方：`openai`、`anthropic` 或 `litellm`。 |
 | `model` | string | `"gpt-4o"` | 模型名称，如 `gpt-4o`、`claude-sonnet-4-20250514`，或任意 LiteLLM 支持的模型标识。 |
-| `api_key_env` | string | `"OPENAI_API_KEY"` | 存放 API Key 的环境变量名。 |
-| `base_url` | string | `null` | 自定义 API 地址，适用于代理、Azure 或本地端点。 |
+| `api_key` | string | `null` | 直接填写 API Key（优先级最高）。设置后忽略 `api_key_env`。 |
+| `api_key_env` | string | `"OPENAI_API_KEY"` | 存放 API Key 的环境变量名。当 `api_key` 未设置时使用。 |
+| `base_url` | string | `null` | 自定义 API 地址，适用于代理、Azure、MiniMax、DeepSeek 或本地端点。 |
 | `max_tokens` | int | `4096` | 单次调用返回的最大 token 数。 |
 | `temperature` | float | `0.1` | 采样温度，值越低输出越确定。 |
 
@@ -108,11 +110,16 @@ ncu_report_path = "/opt/nvidia/nsight-compute/2024.3.2/extras/python"
 |------|-----------|------|
 | `TACHYON_LLM_PROVIDER` | `[llm].provider` | 模型提供方。 |
 | `TACHYON_MODEL` | `[llm].model` | 模型名称。 |
+| `TACHYON_API_KEY` | `[llm].api_key` | 直接传入 API Key（优先级高于 `api_key_env` 指向的变量）。 |
+| `TACHYON_API_KEY_ENV` | `[llm].api_key_env` | 自定义存放 Key 的环境变量名（如 `AGENT_API_KEY`）。 |
+| `TACHYON_BASE_URL` | `[llm].base_url` | 自定义 API 地址。 |
 | `TACHYON_LANG` | `[output].lang` | 输出语言。 |
 | `TACHYON_STRATEGY` | `[profiling].strategy` | 采集策略。 |
 | `TACHYON_NCU_REPORT_PATH` | `[tools].ncu_report_path` | NCU Python 绑定目录路径。 |
 
-此外，LLM 的 API Key 从 `[llm].api_key_env` 指定的环境变量中读取（默认为 `OPENAI_API_KEY`）。
+此外，当 `TACHYON_API_KEY` 未设置时，LLM 的 API Key 从 `api_key_env` 指定的环境变量中读取（默认为 `OPENAI_API_KEY`）。
+
+Key 读取优先级：`TACHYON_API_KEY` > `config.llm.api_key`（TOML） > `$api_key_env` 环境变量值。
 
 ### 各提供方的 API Key 变量
 
@@ -169,6 +176,53 @@ tachyon chat report.ncu-rep
 ```bash
 # 不需要 API Key，也不需要配置文件
 tachyon analyze report.ncu-rep --no-ai
+```
+
+### 第三方 OpenAI 兼容 API（MiniMax / DeepSeek / 通义千问等）
+
+任何 OpenAI 兼容的 API 都可以通过 `provider = "openai"` + `base_url` 接入。
+
+**方式一：纯环境变量（零配置文件）**
+
+```bash
+# MiniMax
+export TACHYON_API_KEY="你的MiniMax Key"
+export TACHYON_BASE_URL=https://api.minimax.chat/v1
+export TACHYON_MODEL=MiniMax-Text-01
+tachyon analyze report.ncu-rep
+
+# DeepSeek
+export TACHYON_API_KEY="你的DeepSeek Key"
+export TACHYON_BASE_URL=https://api.deepseek.com
+export TACHYON_MODEL=deepseek-chat
+tachyon analyze report.ncu-rep
+```
+
+**方式二：配置文件**
+
+```toml
+# ~/.tachyon/config.toml
+[llm]
+provider = "openai"
+model = "MiniMax-Text-01"
+api_key_env = "MINIMAX_API_KEY"
+base_url = "https://api.minimax.chat/v1"
+```
+
+```bash
+export MINIMAX_API_KEY="你的Key"
+tachyon chat report.ncu-rep
+```
+
+**方式三：自定义环境变量名**
+
+```bash
+# 用自己起的变量名存 Key
+export AGENT_API_KEY="你的Key"
+export TACHYON_API_KEY_ENV=AGENT_API_KEY
+export TACHYON_BASE_URL=https://api.minimax.chat/v1
+export TACHYON_MODEL=MiniMax-Text-01
+tachyon analyze report.ncu-rep
 ```
 
 ### 自定义 CUDA 安装路径

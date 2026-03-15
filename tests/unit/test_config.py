@@ -13,6 +13,8 @@ class TestDefaultConfig:
         cfg = TachyonConfig()
         assert cfg.llm.provider == "openai"
         assert cfg.llm.model == "gpt-4o"
+        assert cfg.llm.api_key is None
+        assert cfg.llm.api_key_env == "OPENAI_API_KEY"
         assert cfg.profiling.strategy == "conservative"
         assert cfg.output.lang == "en"
         assert cfg.output.format == "terminal"
@@ -76,6 +78,27 @@ class TestEnvOverride:
             cfg = TachyonConfig()
             cfg._apply_env()
             assert cfg.tools.ncu_report_path == "/my/ncu"
+
+    def test_env_api_key_direct(self):
+        """TACHYON_API_KEY sets api_key directly."""
+        with patch.dict(os.environ, {"TACHYON_API_KEY": "sk-my-key"}, clear=False):
+            cfg = TachyonConfig()
+            cfg._apply_env()
+            assert cfg.llm.api_key == "sk-my-key"
+
+    def test_env_api_key_env_override(self):
+        """TACHYON_API_KEY_ENV changes which env var holds the key."""
+        with patch.dict(os.environ, {"TACHYON_API_KEY_ENV": "AGENT_API_KEY"}, clear=False):
+            cfg = TachyonConfig()
+            cfg._apply_env()
+            assert cfg.llm.api_key_env == "AGENT_API_KEY"
+
+    def test_env_base_url(self):
+        """TACHYON_BASE_URL sets llm.base_url."""
+        with patch.dict(os.environ, {"TACHYON_BASE_URL": "https://api.minimax.chat/v1"}, clear=False):
+            cfg = TachyonConfig()
+            cfg._apply_env()
+            assert cfg.llm.base_url == "https://api.minimax.chat/v1"
 
 
 class TestCliOverride:

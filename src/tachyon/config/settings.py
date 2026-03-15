@@ -28,7 +28,8 @@ class LLMConfig:
     """LLM backend configuration."""
     provider: str = "openai"
     model: str = "gpt-4o"
-    api_key_env: str = "OPENAI_API_KEY"
+    api_key: str | None = None        # direct key (highest priority)
+    api_key_env: str = "OPENAI_API_KEY"  # env var name to read key from
     base_url: str | None = None
     max_tokens: int = 4096
     temperature: float = 0.1
@@ -105,6 +106,9 @@ class TachyonConfig:
         env_map = {
             "TACHYON_LLM_PROVIDER": ("llm", "provider"),
             "TACHYON_MODEL": ("llm", "model"),
+            "TACHYON_API_KEY": ("llm", "api_key"),
+            "TACHYON_API_KEY_ENV": ("llm", "api_key_env"),
+            "TACHYON_BASE_URL": ("llm", "base_url"),
             "TACHYON_LANG": ("output", "lang"),
             "TACHYON_STRATEGY": ("profiling", "strategy"),
             "TACHYON_NCU_REPORT_PATH": ("tools", "ncu_report_path"),
@@ -116,6 +120,9 @@ class TachyonConfig:
         # Auto-detect LLM backend if no explicit config overrides it
         has_explicit = (
             os.environ.get("TACHYON_LLM_PROVIDER")
+            or os.environ.get("TACHYON_API_KEY")
+            or os.environ.get("TACHYON_API_KEY_ENV")
+            or os.environ.get("TACHYON_BASE_URL")
             or toml_has_llm
         )
         if not has_explicit:

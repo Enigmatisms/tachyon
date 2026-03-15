@@ -20,6 +20,9 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+
 from tachyon.cli.main import app
 from tachyon.config.settings import TachyonConfig
 
@@ -155,12 +158,18 @@ async def _chat_loop(
     kernel_context = build_kernel_context(kernels)
     system_prompt = build_system_prompt(tool_registry, kernel_context)
 
+    # Transparency: show user what context the AI agent has
+    _show_agent_context(kernels, tool_registry)
+
     history = []
     total_tokens = 0
+    prompt_session: PromptSession[str] = PromptSession()
 
     while True:
         try:
-            user_input = console.input("\n[bold cyan]You>[/bold cyan] ").strip()
+            user_input = (await prompt_session.prompt_async(
+                HTML("\n<cyan><b>You&gt;</b></cyan> ")
+            )).strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye![/dim]")
             break
@@ -177,34 +186,60 @@ async def _chat_loop(
                 break  # /quit
             continue
 
-        # Run agent loop
-        console.print("[bold green]Tachyon>[/bold green] ", end="")
+        # Run agent loop — show tool calls in real time for transparency
         text_buffer = []
+        tool_calls_made: list[str] = []
 
+        console.print("[dim]Analyzing...[/dim]")
         async for event in run_agent_loop(
             backend=backend,
             registry=tool_registry,
             user_message=user_input,
             system_prompt=system_prompt,
             history=history[-10:],  # keep last 10 messages for context
-            stream=False,  # non-streaming for simplicity in MVP
+            stream=False,
         ):
             if event.type == "text":
                 text_buffer.append(event.content or "")
-            elif event.type == "tool_call" and verbose:
-                console.print(f"  [dim]→ {event.content}[/dim]")
-            elif event.type == "tool_result" and verbose:
-                console.print(f"  [dim]← {event.content}[/dim]")
-            elif event.type == "system":
-                console.print(f"  [yellow]{event.content}[/yellow]")
+            elif event.type == "thinking":
+                # Intermediate LLM text while calling tools — show dimmed
+                if event.content:
+                    console.print(f"  [dim italic]{event.content[:120]}[/dim italic]")
+            elif event.type == "tool_call":
+                name = event.data["name"] if event.data else "?"
+                args = event.data.get("arguments", {}) if event.data else {}
+                tool_calls_made.append(name)
+                # Always show tool calls — this is key transparency
+                args_short = ", ".join(
+                    f"{k}={v}" for k, v in list(args.items())[:3]
+                )
+                console.print(f"  [cyan]▶ {name}[/cyan]({args_short})")
+            elif event.type == "tool_result":
+                if event.data:
+                    summary = event.data.get("summary", "")
+                    ok = "✓" if event.data.get("success") else "✗"
+                    # Show abbreviated result so user sees real data
+                    console.print(f"    [dim]{ok} {summary[:160]}[/dim]")
             elif event.type == "done":
                 if event.data:
-                    total_tokens += event.data.get("total_tokens", 0)
+                    turns = event.data.get("turns", 0)
+                    n_tools = event.data.get("tool_calls", 0)
+                    tokens = event.data.get("total_tokens", 0)
+                    total_tokens += tokens
+                    console.print(
+                        f"  [dim]({turns} turns, {n_tools} tool calls, "
+                        f"{tokens:,} tokens)[/dim]"
+                    )
 
         # Render collected text as markdown
         full_text = "".join(text_buffer)
         if full_text:
-            console.print(Markdown(full_text))
+            console.print()
+            console.print(Panel(
+                Markdown(full_text),
+                title="[bold green]Tachyon[/bold green]",
+                border_style="green",
+            ))
 
         # Update history
         from tachyon.llm.backend import Message, Role
@@ -274,6 +309,60 @@ def _show_opt_tree(kernels: list, kernel_id: int) -> None:
     console.print(Markdown(md))
 
 
+def _show_agent_context(kernels: list, tool_registry: ToolRegistry) -> None:
+    """Show the user what context and tools the AI agent has access to."""
+    from rich.table import Table
+
+    # Tools overview
+    tool_names = [t.name for t in tool_registry.all_definitions()]
+    console.print(
+        f"  [dim]Agent tools ({len(tool_names)}): "
+        f"{', '.join(tool_names)}[/dim]"
+    )
+
+    # Key metrics excerpt per kernel
+    table = Table(
+        title="Agent Context (data available to LLM)",
+        show_header=True,
+        header_style="bold cyan",
+        border_style="dim",
+        title_style="bold",
+        expand=False,
+    )
+    table.add_column("Kernel", style="green", max_width=50)
+    table.add_column("SM%", justify="right")
+    table.add_column("DRAM%", justify="right")
+    table.add_column("Occup%", justify="right")
+    table.add_column("Regs", justify="right")
+    table.add_column("Shared", justify="right")
+    table.add_column("Duration", justify="right")
+
+    for k in kernels:
+        name = (k.demangled_name or k.kernel_name)
+        if len(name) > 50:
+            name = name[:47] + "..."
+        sm = k.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed")
+        dram = k.metric_value("dram__throughput.avg.pct_of_peak_sustained_elapsed")
+        occ = k.metric_value("sm__warps_active.avg.pct_of_peak_sustained_active")
+        dur = k.metric_value("gpu__time_duration.sum")
+        table.add_row(
+            name,
+            f"{sm:.1f}" if sm is not None else "-",
+            f"{dram:.1f}" if dram is not None else "-",
+            f"{occ:.1f}" if occ is not None else "-",
+            str(k.launch_params.registers_per_thread),
+            f"{k.launch_params.shared_mem_bytes}B",
+            f"{dur / 1e6:.2f}ms" if dur is not None else "-",
+        )
+
+    console.print(table)
+    console.print(
+        "  [dim]The agent can call tools to fetch detailed metrics, "
+        "source hotspots, SASS instructions, and stall analysis.[/dim]"
+    )
+    console.print()
+
+
 def _load_report(report_file: str, config: TachyonConfig) -> list:
     """Load .ncu-rep file and return list of KernelReport objects."""
     try:
@@ -295,7 +384,7 @@ def _try_create_backend(config: TachyonConfig) -> LLMBackend | None:
 
     from tachyon.llm.backend import create_backend
 
-    api_key = os.environ.get(config.llm.api_key_env)
+    api_key = config.llm.api_key or os.environ.get(config.llm.api_key_env)
     try:
         return create_backend(
             provider=config.llm.provider,

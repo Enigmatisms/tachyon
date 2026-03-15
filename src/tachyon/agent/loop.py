@@ -101,19 +101,31 @@ async def run_agent_loop(
             yield AgentEvent(type="system", content="Compressing context...")
             messages = ctx.distill(messages)
 
-        # Final turn: force synthesis
+        # Reserve last 2 turns for synthesis (force no tools)
+        remaining = MAX_TURNS - turn
+        is_synthesis = remaining <= 2 and turn > 0
         is_final = (turn == MAX_TURNS - 1)
-        tool_choice = "none" if is_final else "auto"
 
-        if is_final:
-            yield AgentEvent(type="system", content="Final turn: synthesizing...")
+        if is_synthesis:
+            # Inject synthesis instruction
+            if remaining == 2:
+                messages.append(Message(
+                    role=Role.USER,
+                    content=(
+                        "You have gathered enough data. Now synthesize your "
+                        "findings into a comprehensive analysis. Do NOT call "
+                        "any more tools — provide your final diagnosis, root "
+                        "causes, and prioritized recommendations based on "
+                        "all the evidence collected above."
+                    ),
+                ))
 
         # Call LLM
         try:
             response = await backend.chat_completion(
                 messages=messages,
-                tools=tool_defs if not is_final else None,
-                tool_choice=tool_choice,
+                tools=tool_defs if not is_synthesis else None,
+                tool_choice="none" if is_synthesis else "auto",
                 stream=stream,
                 max_tokens=4096,
                 temperature=0.1,
@@ -148,7 +160,7 @@ async def run_agent_loop(
                 yield AgentEvent(type="text", content=content)
             break
 
-        # Tool calls → execute each
+        # Tool calls with accompanying text → yield as "thinking" (not final text)
         messages.append(Message(
             role=Role.ASSISTANT,
             content=content,
@@ -156,7 +168,7 @@ async def run_agent_loop(
         ))
 
         if content:
-            yield AgentEvent(type="text", content=content)
+            yield AgentEvent(type="thinking", content=content)
 
         for tc in tool_calls:
             usage.tool_calls += 1
@@ -189,7 +201,7 @@ async def run_agent_loop(
             ))
 
         if turn >= TYPICAL_TURNS - 1:
-            _log.warning("Agent at turn %d/%d", turn + 1, MAX_TURNS)
+            _log.debug("Agent at turn %d/%d", turn + 1, MAX_TURNS)
 
     yield AgentEvent(type="done", data=_usage_dict(usage))
 

@@ -136,42 +136,51 @@ def build_ai_prompt(
 ) -> str:
     """Build a focused AI prompt from kernel metrics + rule-engine findings.
 
-    Always produces a prompt — even when findings are empty, the raw kernel
-    metrics are included so the AI can analyze them directly.
+    The prompt provides all pre-computed data AND explicitly instructs the
+    agent to call tools for deeper investigation (source, SASS, stalls).
     """
     parts: list[str] = []
     category_counts: dict[str, int] = defaultdict(int)
 
-    # Always include raw kernel metrics overview
+    parts.append("# Pre-computed Analysis Data\n")
+    parts.append("The following metrics and findings have been pre-computed. "
+                 "Use them as starting context, then call tools to investigate deeper.\n")
+
+    # Raw kernel metrics overview
     for r in reports:
-        parts.append(f"\n### Kernel: {r.demangled_name}")
+        parts.append(f"\n## Kernel: {r.demangled_name}")
         lp = r.launch_params
-        parts.append(f"Grid: {lp.grid}, Block: {lp.block}, "
-                      f"Regs: {lp.registers_per_thread}/thread, "
-                      f"Shared: {lp.shared_mem_bytes}B")
+        parts.append(f"- Grid: {lp.grid}, Block: {lp.block}")
+        parts.append(f"- Registers/thread: {lp.registers_per_thread}, "
+                      f"Shared mem: {lp.shared_mem_bytes}B")
         run_count = getattr(r, "run_count", 1)
         if run_count > 1:
-            parts.append(f"Averaged over {run_count} runs")
+            parts.append(f"- Averaged over {run_count} runs")
+
+        # Source files if available
+        if r.source_files:
+            parts.append(f"- Source files embedded: {', '.join(r.source_files[:5])}")
 
         # Top metrics
         key_metrics = sorted(
             r.metrics.items(),
             key=lambda kv: abs(kv[1].value),
             reverse=True,
-        )[:20]
+        )[:25]
         if key_metrics:
-            parts.append("Key metrics:")
+            parts.append("\n### Key Metrics")
             for name, mv in key_metrics:
-                parts.append(f"  {name} = {mv.value:.4g} {mv.unit}")
+                unit = mv.unit or ""
+                parts.append(f"  {name} = {mv.value:.4g} {unit}")
 
     # Append rule-engine findings
     for kernel_name, findings in findings_map.items():
         if not findings:
             continue
-        parts.append(f"\n### Rule-Engine Findings for {kernel_name}")
+        parts.append(f"\n## Rule-Engine Findings: {kernel_name}")
         for f in findings:
             parts.append(
-                f"- [{f.severity.value.upper()}] {f.title}\n"
+                f"- **[{f.severity.value.upper()}]** {f.title}\n"
                 f"  {f.detail}"
             )
             if f.metrics:
@@ -179,6 +188,8 @@ def build_ai_prompt(
                     f"{k}={v:.2f}" for k, v in list(f.metrics.items())[:5]
                 )
                 parts.append(f"  Metrics: {metric_str}")
+            if f.source_location:
+                parts.append(f"  Source: {f.source_location.file}:{f.source_location.line}")
             if f.category:
                 category_counts[f.category] += 1
 
@@ -191,48 +202,105 @@ def build_ai_prompt(
 
     if ratio > 0.5 and dominant in ("compute",):
         focus = (
-            "The dominant bottleneck is COMPUTE. Focus your analysis on:\n"
+            "The dominant bottleneck is **COMPUTE**. Focus on:\n"
             "- Instruction-level inefficiencies (FP32 vs FP16/TF32, divergent branches)\n"
             "- Tensor Core / WMMA utilization opportunities\n"
-            "- Algorithmic complexity reduction (loop unrolling, strength reduction)\n"
-            "- Instruction-level parallelism (ILP) improvements"
+            "- Algorithmic complexity reduction"
         )
     elif ratio > 0.5 and dominant in ("memory",):
         focus = (
-            "The dominant bottleneck is MEMORY. Focus your analysis on:\n"
+            "The dominant bottleneck is **MEMORY**. Focus on:\n"
             "- Global memory coalescing patterns (SoA vs AoS, alignment)\n"
-            "- Shared memory bank conflicts and padding strategies\n"
-            "- L2 cache utilization and persistence hints (Ampere+)\n"
-            "- Memory traffic reduction via tiling, data reuse, compression"
+            "- Shared memory bank conflicts and padding\n"
+            "- L2 cache utilization and memory traffic reduction"
         )
     elif ratio > 0.5 and dominant in ("latency",):
         focus = (
-            "The dominant bottleneck is LATENCY. Focus your analysis on:\n"
+            "The dominant bottleneck is **LATENCY**. Focus on:\n"
             "- Occupancy limiters (registers, shared memory, block size)\n"
-            "- Warp stall reasons (long scoreboard, barrier, memory dependency)\n"
-            "- Synchronization overhead (__syncthreads, atomics)\n"
-            "- Instruction-level overlap of memory and compute"
+            "- Warp stall reasons (long scoreboard, barrier, dependency)\n"
+            "- Synchronization overhead and instruction-level overlap"
         )
     else:
         focus = (
             "Multiple bottleneck types detected. Provide a comprehensive analysis:\n"
-            "- Identify the #1 priority optimization with the highest expected impact\n"
-            "- For each finding, explain WHY it matters and HOW to fix it\n"
-            "- Suggest a concrete optimization order (what to fix first)"
+            "- Identify the #1 priority optimization\n"
+            "- For each finding, explain WHY and HOW to fix"
         )
 
-    return (
-        f"## Kernel Metrics & Rule-Engine Findings\n\n{findings_text}\n\n"
-        f"## Analysis Instructions\n\n{focus}\n\n"
-        f"For each kernel:\n"
-        f"1. **Bottleneck Classification**: Confirm or refine the roofline classification\n"
-        f"2. **Root Cause**: Explain the underlying microarchitectural reason\n"
-        f"3. **Impact**: Quantify how much performance is left on the table\n"
-        f"4. **Fix**: Give specific, code-level recommendations\n"
-        f"5. **Priority**: Rank optimizations by expected impact\n\n"
-        f"Use the available tools (list_kernels, get_kernel_metrics, "
-        f"run_analysis, get_source_hotspots) to gather additional evidence "
-        f"before giving your final analysis."
+    # Build the instruction section with explicit tool-calling directives
+    kernel_ids = list(range(len(reports)))
+    tool_instructions = (
+        f"# Your Task\n\n"
+        f"{focus}\n\n"
+        f"# Required Steps (follow in order)\n\n"
+        f"1. **Call `run_analysis`** for each kernel ({kernel_ids}) to get "
+        f"structured rule-engine findings with severity and recommendations.\n"
+        f"2. **Call `get_source_hotspots`** for each kernel to find hot source lines "
+        f"(requires -lineinfo; if unavailable, skip to step 4).\n"
+        f"3. For each hotspot found, **call `get_sass_for_source_line`** and "
+        f"**`get_stall_analysis_for_line`** to get instruction-level root cause.\n"
+        f"4. **Call `get_optimization_tree`** for the optimization landscape.\n"
+        f"5. Synthesize all evidence into a diagnosis with:\n"
+        f"   - Bottleneck classification (confirmed by tool data)\n"
+        f"   - Root cause with evidence citations [metric=value] or [file:line→SASS]\n"
+        f"   - Prioritized, concrete recommendations\n"
+        f"   - A 'Data Sources' section listing tools called and key data points\n\n"
+        f"**IMPORTANT**: Do NOT skip tool calls. The user can see which tools you "
+        f"called — analysis without tool evidence will appear ungrounded."
+    )
+
+    return f"{findings_text}\n\n{tool_instructions}"
+
+
+def _show_ai_context(
+    reports: list[KernelReport],
+    findings_map: dict[str, list[Finding]],
+    verbose: bool = False,
+) -> None:
+    """Show the user what data is being sent to the AI agent."""
+    from tachyon.utils.progress import console
+
+    lines = []
+    for r in reports:
+        name = r.demangled_name or r.kernel_name
+        sm = r.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed")
+        dram = r.metric_value("dram__throughput.avg.pct_of_peak_sustained_elapsed")
+        dur = r.metric_value("gpu__time_duration.sum")
+        lines.append(
+            f"  [bold]{name}[/bold]: "
+            f"SM={sm:.1f}%" if sm is not None else "SM=-"
+        )
+        parts = []
+        if dram is not None:
+            parts.append(f"DRAM={dram:.1f}%")
+        if dur is not None:
+            parts.append(f"dur={dur / 1e6:.2f}ms")
+        parts.append(f"regs={r.launch_params.registers_per_thread}")
+        if parts:
+            lines[-1] += f", {', '.join(parts)}"
+
+    total_findings = sum(len(fs) for fs in findings_map.values())
+    n_critical = sum(
+        1 for fs in findings_map.values()
+        for f in fs if f.severity == Severity.CRITICAL
+    )
+    n_warning = sum(
+        1 for fs in findings_map.values()
+        for f in fs if f.severity == Severity.WARNING
+    )
+
+    console.print("[dim]Data sent to AI agent:[/dim]")
+    for line in lines:
+        console.print(f"[dim]{line}[/dim]")
+    console.print(
+        f"[dim]  Rule-engine findings: {total_findings} total "
+        f"({n_critical} CRITICAL, {n_warning} WARNING)[/dim]"
+    )
+    console.print(
+        f"[dim]  Tools available: list_kernels, get_kernel_metrics, "
+        f"run_analysis, get_source_hotspots, get_sass_for_source_line, "
+        f"get_stall_analysis_for_line, get_optimization_tree[/dim]"
     )
 
 
@@ -252,11 +320,14 @@ def try_ai_analysis(
     if not user_prompt:
         return None
 
+    # Transparency: show excerpt of what's being sent to AI
+    _show_ai_context(reports, findings_map, verbose)
+
     # Try to create LLM backend
     try:
         from tachyon.llm.backend import create_backend
 
-        api_key = os.environ.get(config.llm.api_key_env)
+        api_key = config.llm.api_key or os.environ.get(config.llm.api_key_env)
         backend = create_backend(
             provider=config.llm.provider,
             model=config.llm.model,
@@ -304,6 +375,7 @@ def try_ai_analysis(
 
     async def _run() -> str:
         text_parts: list[str] = []
+        tool_calls_made: list[str] = []
         async for event in run_agent_loop(
             backend=backend,
             registry=tool_registry,
@@ -313,10 +385,18 @@ def try_ai_analysis(
         ):
             if event.type == "text" and event.content:
                 text_parts.append(event.content)
-            elif event.type == "tool_call" and verbose:
-                console.print(f"  [dim]→ {event.content}[/dim]")
+            elif event.type == "tool_call":
+                name = event.data["name"] if event.data else "?"
+                tool_calls_made.append(name)
+                if verbose:
+                    console.print(f"  [dim]→ {event.content}[/dim]")
             elif event.type == "tool_result" and verbose:
                 console.print(f"  [dim]← {event.content}[/dim]")
+        if tool_calls_made:
+            console.print(
+                f"  [dim]Agent tool calls: "
+                f"{' → '.join(tool_calls_made)}[/dim]"
+            )
         return "".join(text_parts)
 
     try:
