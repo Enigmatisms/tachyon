@@ -42,8 +42,8 @@ def sample_kernel():
                 name="sm__throughput.avg.pct_of_peak_sustained_elapsed",
                 value=85.0, unit="%",
             ),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed": MetricValue(
-                name="dram__throughput.avg.pct_of_peak_sustained_elapsed",
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": MetricValue(
+                name="gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
                 value=30.0, unit="%",
             ),
         },

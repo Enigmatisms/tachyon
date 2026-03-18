@@ -31,8 +31,8 @@ def _make_test_report() -> KernelReport:
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 MetricValue("sm__throughput.avg.pct_of_peak_sustained_elapsed", 75.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                MetricValue("dram__throughput.avg.pct_of_peak_sustained_elapsed", 40.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                MetricValue("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 40.0, "%"),
         },
     )
 

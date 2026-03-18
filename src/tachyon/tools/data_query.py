@@ -142,10 +142,10 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
             # Include key performance metrics if available
             key_names = [
                 "sm__throughput.avg.pct_of_peak_sustained_elapsed",
-                "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
                 "sm__warps_active.avg.pct_of_peak_sustained_active",
             ]
-            short = {"sm__throughput": "sm_pct", "dram__throughput": "dram_pct",
+            short = {"sm__throughput": "sm_pct", "gpu__dram_throughput": "dram_pct",
                       "sm__warps_active": "occupancy_pct"}
             for name in key_names:
                 mv = k.metrics.get(name)

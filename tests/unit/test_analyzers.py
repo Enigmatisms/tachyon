@@ -64,7 +64,7 @@ class TestRooflineAnalyzer:
         metrics = RooflineAnalyzer().required_metrics()
         assert "sm__throughput.avg.pct_of_peak_sustained_elapsed" in metrics
         # DRAM is consumed if available but NOT required (graceful degradation)
-        assert "dram__throughput.avg.pct_of_peak_sustained_elapsed" not in metrics
+        assert "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed" not in metrics
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━ MemoryAnalyzer ━━━━━━━━━━━━━━━━━━━━━━

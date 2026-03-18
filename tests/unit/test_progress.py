@@ -136,7 +136,8 @@ class TestNcuSpinner:
 
     def test_spinner_update_percentage(self):
         spinner = NcuSpinner(1)
-        spinner.update("==PROF== Profiling kernel: 50%")
+        spinner.update('==PROF== Profiling "kern": 50%')
+        assert spinner._percent == 50.0
         assert "50%" in spinner._status
 
     def test_spinner_update_connected(self):
@@ -155,6 +156,54 @@ class TestNcuSpinner:
         spinner.update("")
         assert spinner._status == original
 
+    def test_spinner_update_kernel_name(self):
+        """Kernel name extraction from ==PROF== Profiling "kernel_name" line."""
+        spinner = NcuSpinner(1)
+        spinner.update('==PROF== Profiling "matmul_kernel": 0%')
+        assert spinner._kernel_name == "matmul_kernel"
+        assert spinner._launch == 1
+
+    def test_spinner_launch_count_increments(self):
+        """Each Profiling line = new launch, even for same kernel."""
+        spinner = NcuSpinner(1)
+        spinner.update('==PROF== Profiling "kern": 0%')
+        assert spinner._launch == 1
+        spinner.update('....50%....100% - 11 passes')
+        spinner.update('==PROF== Profiling "kern": 0%')
+        assert spinner._launch == 2
+        spinner.update('==PROF== Profiling "kern": 0%')
+        assert spinner._launch == 3
+
+    def test_spinner_percent_no_backward(self):
+        """Percentage never goes backward within a launch."""
+        spinner = NcuSpinner(1)
+        spinner.update('==PROF== Profiling "kern": 0%')
+        spinner.update('....50%....100% - 11 passes')
+        assert spinner._percent == 100.0
+        # New launch resets to 0
+        spinner.update('==PROF== Profiling "kern": 0%')
+        assert spinner._percent == 0.0
+        spinner.update('....25%')
+        assert spinner._percent == 25.0
+        # Forward only within a launch
+        spinner.update('....50%')
+        assert spinner._percent == 50.0
+
+    def test_spinner_stop_idempotent(self):
+        """Calling stop() multiple times is safe."""
+        spinner = NcuSpinner(1)
+        spinner.stop()
+        spinner.stop()
+        spinner.stop()
+        assert spinner._stopped is True
+
+    def test_spinner_update_after_stop(self):
+        """Updating after stop is a no-op, not a crash."""
+        spinner = NcuSpinner(1)
+        spinner.stop()
+        spinner.update("==PROF== Profiling: 50%")
+        # Should not crash
+
     def test_spinner_start_stop(self):
         """Spinner starts and stops without errors (transient mode)."""
         buf = StringIO()
@@ -165,3 +214,10 @@ class TestNcuSpinner:
             spinner.update("==PROF== Profiling: 25%")
             spinner.stop()
         # No assertions on output — just ensure no crash
+
+    def test_spinner_del_cleanup(self):
+        """__del__ cleans up even if stop() wasn't called."""
+        spinner = NcuSpinner(1)
+        spinner._stopped = False
+        spinner.__del__()
+        assert spinner._stopped is True

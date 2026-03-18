@@ -48,8 +48,8 @@ def full_kernel() -> KernelReport:
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 MetricValue(name="sm__throughput.avg.pct_of_peak_sustained_elapsed",
                             value=85.0, unit="%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                MetricValue(name="dram__throughput.avg.pct_of_peak_sustained_elapsed",
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                MetricValue(name="gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
                             value=30.0, unit="%"),
         },
     )
@@ -153,9 +153,9 @@ class TestCrossModule:
                         name="sm__throughput.avg.pct_of_peak_sustained_elapsed",
                         value=92.0, unit="%",
                     ),
-                "dram__throughput.avg.pct_of_peak_sustained_elapsed":
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
                     MetricValue(
-                        name="dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                        name="gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
                         value=25.0, unit="%",
                     ),
             },

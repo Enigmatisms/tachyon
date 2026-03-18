@@ -98,7 +98,7 @@ def _make_mock_ncu_module():
         "device__attribute_global_memory_bus_width": (5120, "uint64"),
         "dram__bytes.sum.peak_sustained": (3.352e12, "double"),
         "sm__throughput.avg.pct_of_peak_sustained_elapsed": (75.0, "double"),
-        "dram__throughput.avg.pct_of_peak_sustained_elapsed": (45.0, "double"),
+        "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": (45.0, "double"),
     }
 
     def mock_metric_by_name(name):

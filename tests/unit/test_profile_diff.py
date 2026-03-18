@@ -74,7 +74,7 @@ class TestProfileDifferIdentical:
         """Same metrics -> deltas are all zero."""
         metrics = {
             "sm__throughput.avg.pct_of_peak_sustained_elapsed": 70.0,
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed": 50.0,
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 50.0,
         }
         before = [_make_report("kernel_a", metrics)]
         after = [_make_report("kernel_a", metrics)]
@@ -322,12 +322,12 @@ class TestRegressionDetection:
         before = [_make_report("k", {
             "sm__throughput.avg.pct_of_peak_sustained_elapsed": 80.0,
             "gpu__time_duration.sum": 1000.0,
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed": 50.0,
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 50.0,
         })]
         after = [_make_report("k", {
             "sm__throughput.avg.pct_of_peak_sustained_elapsed": 60.0,  # regression
             "gpu__time_duration.sum": 800.0,                           # improvement
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed": 65.0, # improvement
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": 65.0, # improvement
         })]
 
         diffs = ProfileDiffer().diff(before, after)

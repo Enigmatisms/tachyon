@@ -135,7 +135,7 @@ class TestKernelReport:
     def test_has_metrics_true(self, report_compute_bound: KernelReport):
         assert report_compute_bound.has_metrics([
             "sm__throughput.avg.pct_of_peak_sustained_elapsed",
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed",
         ])
 
     def test_has_metrics_false(self, report_compute_bound: KernelReport):

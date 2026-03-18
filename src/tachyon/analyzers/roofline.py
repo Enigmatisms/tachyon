@@ -17,7 +17,7 @@ from tachyon.models.kernel import KernelReport
 
 # Metric names
 _SM_THROUGHPUT = "sm__throughput.avg.pct_of_peak_sustained_elapsed"
-_DRAM_THROUGHPUT = "dram__throughput.avg.pct_of_peak_sustained_elapsed"
+_DRAM_THROUGHPUT = "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed"
 _DURATION = "gpu__time_duration.sum"
 
 # Thresholds (percent)

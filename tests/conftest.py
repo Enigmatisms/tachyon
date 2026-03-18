@@ -90,8 +90,8 @@ def report_compute_bound(launch_256x4096: LaunchParams, device_h100: DeviceInfo)
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 _mv("sm__throughput.avg.pct_of_peak_sustained_elapsed", 85.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                _mv("dram__throughput.avg.pct_of_peak_sustained_elapsed", 30.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                _mv("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 30.0, "%"),
         },
     )
 
@@ -107,8 +107,8 @@ def report_memory_bound(launch_256x4096: LaunchParams, device_h100: DeviceInfo) 
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 _mv("sm__throughput.avg.pct_of_peak_sustained_elapsed", 25.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                _mv("dram__throughput.avg.pct_of_peak_sustained_elapsed", 78.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                _mv("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 78.0, "%"),
             # Memory analyzer metrics
             "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum":
                 _mv("l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum", 50000.0, "sector"),
@@ -137,8 +137,8 @@ def report_latency_bound(launch_256x4096: LaunchParams, device_h100: DeviceInfo)
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 _mv("sm__throughput.avg.pct_of_peak_sustained_elapsed", 22.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                _mv("dram__throughput.avg.pct_of_peak_sustained_elapsed", 18.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                _mv("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 18.0, "%"),
             # Warp stall metrics
             "smsp__pcsamp_warps_issue_stalled_long_scoreboard.sum":
                 _mv("smsp__pcsamp_warps_issue_stalled_long_scoreboard.sum", 8500.0, ""),
@@ -163,8 +163,8 @@ def report_balanced(launch_256x4096: LaunchParams, device_h100: DeviceInfo) -> K
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 _mv("sm__throughput.avg.pct_of_peak_sustained_elapsed", 88.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                _mv("dram__throughput.avg.pct_of_peak_sustained_elapsed", 85.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                _mv("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 85.0, "%"),
         },
     )
 
@@ -180,8 +180,8 @@ def report_with_rules(launch_256x4096: LaunchParams, device_h100: DeviceInfo) ->
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 _mv("sm__throughput.avg.pct_of_peak_sustained_elapsed", 50.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                _mv("dram__throughput.avg.pct_of_peak_sustained_elapsed", 50.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                _mv("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 50.0, "%"),
         },
         rule_results=[
             RuleResult(rule_name="SpeedOfLight", severity="OK", message="Utilization is fine."),
@@ -206,8 +206,8 @@ def report_coalesced(launch_256x4096: LaunchParams, device_h100: DeviceInfo) -> 
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 _mv("sm__throughput.avg.pct_of_peak_sustained_elapsed", 40.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                _mv("dram__throughput.avg.pct_of_peak_sustained_elapsed", 70.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                _mv("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 70.0, "%"),
             "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum":
                 _mv("l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum", 1100.0, "sector"),
             "l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum":
@@ -227,8 +227,8 @@ def report_no_stalls(launch_256x4096: LaunchParams, device_h100: DeviceInfo) -> 
         metrics={
             "sm__throughput.avg.pct_of_peak_sustained_elapsed":
                 _mv("sm__throughput.avg.pct_of_peak_sustained_elapsed", 90.0, "%"),
-            "dram__throughput.avg.pct_of_peak_sustained_elapsed":
-                _mv("dram__throughput.avg.pct_of_peak_sustained_elapsed", 20.0, "%"),
+            "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed":
+                _mv("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", 20.0, "%"),
             "smsp__pcsamp_warps_issue_stalled_long_scoreboard.sum":
                 _mv("smsp__pcsamp_warps_issue_stalled_long_scoreboard.sum", 0.0, ""),
             "smsp__pcsamp_warps_issue_stalled_barrier.sum":

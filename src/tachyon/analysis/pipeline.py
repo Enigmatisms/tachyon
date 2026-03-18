@@ -159,7 +159,8 @@ def build_ai_prompt(
 
         # Source files if available
         if r.source_files:
-            parts.append(f"- Source files embedded: {', '.join(r.source_files[:5])}")
+            names = list(r.source_files.keys())[:5]
+            parts.append(f"- Source files embedded: {', '.join(names)}")
 
         # Top metrics
         key_metrics = sorted(
@@ -265,7 +266,7 @@ def _show_ai_context(
     for r in reports:
         name = r.demangled_name or r.kernel_name
         sm = r.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed")
-        dram = r.metric_value("dram__throughput.avg.pct_of_peak_sustained_elapsed")
+        dram = r.metric_value("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed")
         dur = r.metric_value("gpu__time_duration.sum")
         lines.append(
             f"  [bold]{name}[/bold]: "

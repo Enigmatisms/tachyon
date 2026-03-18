@@ -42,7 +42,7 @@ _SEVERITY_BADGE: dict[str, str] = {
 # Key metrics to show in the overview panel (metric_name → display_label)
 _OVERVIEW_METRICS: list[tuple[str, str, str]] = [
     ("sm__throughput.avg.pct_of_peak_sustained_elapsed", "SM Throughput", "%"),
-    ("dram__throughput.avg.pct_of_peak_sustained_elapsed", "DRAM Throughput", "%"),
+    ("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed", "DRAM Throughput", "%"),
     ("gpu__time_duration.sum", "Duration", "ns"),
     ("launch__occupancy_limit_registers", "Occupancy (reg limit)", "%"),
     ("sm__warps_active.avg.pct_of_peak_sustained_active", "Active Warps", "%"),

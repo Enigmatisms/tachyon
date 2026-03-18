@@ -349,7 +349,7 @@ def _show_agent_context(kernels: list, tool_registry: ToolRegistry) -> None:
         if len(name) > 50:
             name = name[:47] + "..."
         sm = k.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed")
-        dram = k.metric_value("dram__throughput.avg.pct_of_peak_sustained_elapsed")
+        dram = k.metric_value("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed")
         occ = k.metric_value("sm__warps_active.avg.pct_of_peak_sustained_active")
         dur = k.metric_value("gpu__time_duration.sum")
         table.add_row(

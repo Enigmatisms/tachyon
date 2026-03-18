@@ -49,19 +49,18 @@ def _make_profiler(
 def _mock_subprocess_success(
     output_path: Path,
     returncode: int = 0,
-    stderr: str = "",
+    stdout_lines: str = "",
 ) -> MagicMock:
     """Build a mock subprocess.Popen return value and create the output file.
 
-    The mock simulates Popen's interface: stderr is an iterable of lines,
-    stdout.read() returns empty string, wait() does nothing, returncode is set.
+    The mock simulates Popen's interface with stderr=subprocess.STDOUT:
+    all output goes to stdout (iterable of lines), stderr is None.
     """
     mock_proc = MagicMock()
     mock_proc.returncode = returncode
-    # stderr is iterable of lines (simulating Popen stderr pipe)
-    mock_proc.stderr = iter(stderr.splitlines(keepends=True)) if stderr else iter([])
-    mock_proc.stdout = MagicMock()
-    mock_proc.stdout.read.return_value = ""
+    # With stderr=STDOUT, all output is on stdout as iterable lines
+    mock_proc.stdout = iter(stdout_lines.splitlines(keepends=True)) if stdout_lines else iter([])
+    mock_proc.stderr = None  # stderr=STDOUT means stderr fd is None
     mock_proc.wait.return_value = None
     mock_proc.kill.return_value = None
     # Create the output file so the exists() check passes.
@@ -74,24 +73,30 @@ def _mock_popen_failure(
     returncode: int = 1,
     stderr: str = "",
 ) -> MagicMock:
-    """Build a mock Popen for failure cases (no output file created)."""
+    """Build a mock Popen for failure cases (no output file created).
+
+    Note: NcuProfiler uses stderr=subprocess.STDOUT, so all output
+    goes to stdout. We put the error text on stdout to match.
+    """
     mock_proc = MagicMock()
     mock_proc.returncode = returncode
-    mock_proc.stderr = iter(stderr.splitlines(keepends=True)) if stderr else iter([])
-    mock_proc.stdout = MagicMock()
-    mock_proc.stdout.read.return_value = ""
+    mock_proc.stdout = iter(stderr.splitlines(keepends=True)) if stderr else iter([])
+    mock_proc.stderr = None  # stderr=STDOUT means stderr is None
     mock_proc.wait.return_value = None
     mock_proc.kill.return_value = None
     return mock_proc
 
 
 def _mock_popen_timeout() -> MagicMock:
-    """Build a mock Popen that times out on wait(timeout=...) but succeeds on wait() after kill."""
+    """Build a mock Popen that times out on wait(timeout=...) but succeeds on wait() after kill.
+
+    Note: NcuProfiler uses stderr=subprocess.STDOUT, so all output
+    goes to stdout. stderr is None.
+    """
     mock_proc = MagicMock()
     mock_proc.returncode = -9
-    mock_proc.stderr = iter([])
-    mock_proc.stdout = MagicMock()
-    mock_proc.stdout.read.return_value = ""
+    mock_proc.stdout = iter([])  # no output before timeout
+    mock_proc.stderr = None  # stderr=STDOUT means stderr is None
     mock_proc.kill.return_value = None
     # First wait(timeout=N) raises TimeoutExpired, second wait() after kill succeeds
     mock_proc.wait.side_effect = [
@@ -229,6 +234,7 @@ class TestNcuProfilerBuildCommand:
             "--export", str(out_file),
             "--force-overwrite",
             "--target-processes", "all",
+            "--import-source", "yes",
             "./app",
             "--size", "1024",
         ]
@@ -256,6 +262,7 @@ class TestNcuProfilerBuildCommand:
             "--export", str(out_file),
             "--force-overwrite",
             "--target-processes", "all",
+            "--import-source", "yes",
             "--section", "SourceCounters",
             "--kernel-name", "matmul_kernel",
             "--kernel-name", "reduce_kernel",
@@ -560,7 +567,7 @@ class TestNcuProfilerRun:
 
     @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_basic_subprocess_call_args(self, mock_popen: MagicMock, tmp_path: Path) -> None:
-        """Verify subprocess.Popen is called with stdout/stderr PIPE and text=True."""
+        """Verify subprocess.Popen is called with stdout=PIPE, stderr=STDOUT, text=True."""
         profiler, _ = _make_profiler()
         out_file = tmp_path / "stage1.ncu-rep"
         mock_popen.return_value = _mock_subprocess_success(out_file)
@@ -570,7 +577,7 @@ class TestNcuProfilerRun:
         mock_popen.assert_called_once()
         _, kwargs = mock_popen.call_args
         assert kwargs["stdout"] == subprocess.PIPE
-        assert kwargs["stderr"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.STDOUT
         assert kwargs["text"] is True
 
     @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
