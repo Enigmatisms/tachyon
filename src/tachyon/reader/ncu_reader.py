@@ -409,6 +409,7 @@ class NcuReportReader:
         # _extract_instanced_metrics (not stored as scalars).
         _PER_PC_PREFIXES = (
             "smsp__pcsamp_warps_issue_stalled_",
+            "smsp__pcsamp_warp_stall_reason_",
             "inst_executed",
             "thread_inst_executed",
         )
@@ -452,8 +453,11 @@ class NcuReportReader:
         """
         instanced: dict[str, list[InstancedMetricValue]] = {}
 
-        # M1 scope: warp-stall PC-sampling metrics
-        stall_prefixes = ("smsp__pcsamp_warps_issue_stalled_",)
+        # M1 scope: warp-stall PC-sampling metrics (both new and legacy formats)
+        stall_prefixes = (
+            "smsp__pcsamp_warps_issue_stalled_",
+            "smsp__pcsamp_warp_stall_reason_",
+        )
         # M2 scope: execution count metrics (inst_executed, thread_inst_executed_true)
         exec_names = ("inst_executed", "thread_inst_executed_true")
 

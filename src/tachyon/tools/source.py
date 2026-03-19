@@ -23,6 +23,18 @@ from .registry import ToolDefinition, ToolRegistry
 def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
     """Register 4 source correlation tools."""
 
+    # Helper to sum all stall metrics from a per-PC metrics dict
+    def _sum_stalls(metrics: dict) -> int:
+        """Sum all stall metric values across both new and legacy formats."""
+        total = 0
+        for names in NCUMappingSystem.CATEGORY_MAP.values():
+            for n in names:
+                total += metrics.get(n, 0)
+        for names in NCUMappingSystem.CATEGORY_MAP_LEGACY.values():
+            for n in names:
+                total += metrics.get(n, 0)
+        return total
+
     # Helper to generate diagnostic message
     def _diagnose_missing_correlation() -> str:
         """Generate diagnostic message for why correlation is unavailable."""
@@ -188,6 +200,10 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
                                 "category": NCUMappingSystem.classify_sass(
                                     e["sass"]
                                 ),
+                                "inst_executed": e["metrics"].get(
+                                    "inst_executed", 0
+                                ),
+                                "stalls": _sum_stalls(e["metrics"]),
                             }
                             for e in insts
                         ],
@@ -275,7 +291,9 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
             return ToolResult.fail(ErrorCode.METRIC_NOT_FOUND, str(e))
 
         # Primary path: SourceCorrelator (instanced metrics)
+        correlator_tried = False
         if ctx.correlator is not None and ctx.action is not None:
+            correlator_tried = True
             try:
                 instanced = kernel.instanced_metrics_as_tuples()
                 all_hotspots = ctx.correlator.correlate(
@@ -286,66 +304,145 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
                     if h.source_file == file and h.source_line == line:
                         match = h
                         break
-                if match is None:
+                if match is not None:
+                    total = sum(match.stall_reasons.values()) or 1.0
+                    breakdown = {}
+                    for reason, ratio in sorted(
+                        match.stall_reasons.items(),
+                        key=lambda x: x[1], reverse=True,
+                    ):
+                        if ratio > 0:
+                            short = reason.replace(
+                                "smsp__pcsamp_warps_issue_stalled_", ""
+                            ).replace(
+                                "smsp__pcsamp_warp_stall_reason_", ""
+                            )
+                            breakdown[short] = {
+                                "ratio": round(ratio, 3),
+                                "pct": round(ratio / total * 100, 1),
+                            }
+
+                    # Compute SPI from metric_values
+                    total_stalls = sum(
+                        v for k, v in match.metric_values.items()
+                        if "pcsamp_warps_issue_stalled" in k
+                        or "pcsamp_warp_stall_reason" in k
+                    )
+                    total_exec = match.metric_values.get("inst_executed", 0)
+                    if total_exec > 0:
+                        spi = round(total_stalls / total_exec, 2)
+                    elif total_stalls > 0:
+                        spi = -1.0
+                    else:
+                        spi = 0.0
+
+                    return ToolResult.ok({
+                        "file": file,
+                        "line": line,
+                        "spi": spi,
+                        "dominant_stall": (
+                            match.dominant_stall.replace(
+                                "smsp__pcsamp_warps_issue_stalled_", ""
+                            ).replace(
+                                "smsp__pcsamp_warp_stall_reason_", ""
+                            )
+                            if match.dominant_stall else "unknown"
+                        ),
+                        "global_pct": round(match.global_ratio * 100, 1),
+                        "breakdown": breakdown,
+                    })
+            except Exception:
+                pass  # Fall through to mapper
+
+        # Mapper path: O(1) lookup via get_sass_by_line (no top_n limit)
+        if ctx.mapper is not None:
+            try:
+                insts = ctx.mapper.get_sass_by_line(
+                    kernel.kernel_name, file, line,
+                )
+                if not insts:
                     return ToolResult.fail(
                         ErrorCode.NO_DEBUG_INFO,
                         f"No stall data for {file}:{line}.",
                     )
-                total = sum(match.stall_reasons.values()) or 1.0
-                breakdown = {}
-                for reason, ratio in sorted(
-                    match.stall_reasons.items(), key=lambda x: x[1], reverse=True,
-                ):
-                    if ratio > 0:
-                        short = reason.replace(
-                            "smsp__pcsamp_warps_issue_stalled_", ""
+
+                # Use mapper's active category map if available (supports
+                # both new and legacy NCU metric formats); fall back to
+                # CATEGORY_MAP for mock mappers in tests.
+                if isinstance(ctx.mapper, NCUMappingSystem):
+                    active_map = getattr(
+                        ctx.mapper, '_active_category_map',
+                        NCUMappingSystem.CATEGORY_MAP,
+                    )
+                else:
+                    active_map = NCUMappingSystem.CATEGORY_MAP
+                stall_profile, total_stalls = NCUMappingSystem._compute_stalls(
+                    insts, active_map,
+                )
+                line_exec = sum(
+                    e["metrics"].get("inst_executed", 0) for e in insts
+                )
+                line_samples = sum(
+                    e["metrics"].get("smsp__pcsamp_sample_count", 0)
+                    for e in insts
+                )
+                if line_exec > 0:
+                    spi = round(total_stalls / line_exec, 2)
+                elif total_stalls > 0:
+                    spi = -1.0
+                else:
+                    spi = 0.0
+
+                if total_stalls > 0:
+                    breakdown = {
+                        k: {"ratio": None, "pct": round(v / total_stalls * 100, 1)}
+                        for k, v in sorted(
+                            stall_profile.items(),
+                            key=lambda x: x[1], reverse=True,
                         )
-                        breakdown[short] = {
-                            "ratio": round(ratio, 3),
-                            "pct": round(ratio / total * 100, 1),
-                        }
+                    }
+                else:
+                    breakdown = {}
+
+                sass_mix = NCUMappingSystem.classify_line_sass(insts)
+                dominant_sass = (
+                    max(sass_mix, key=sass_mix.get)
+                    if sass_mix else "none"
+                )
+                include_chain = ctx.mapper.get_include_chain(file)
+
                 return ToolResult.ok({
                     "file": file,
                     "line": line,
-                    "dominant_stall": match.dominant_stall.replace(
-                        "smsp__pcsamp_warps_issue_stalled_", ""
-                    ) if match.dominant_stall else "unknown",
-                    "global_pct": round(match.global_ratio * 100, 1),
+                    "spi": spi,
+                    "include_chain": include_chain,
+                    "dominant_stall": max(
+                        stall_profile, key=stall_profile.get,
+                    ) if stall_profile else "none",
+                    "dominant_sass": dominant_sass,
+                    "sass_mix": sass_mix,
+                    "global_pct": round(
+                        line_samples
+                        / max(
+                            ctx.mapper._total_samples_per_kernel.get(
+                                kernel.kernel_name, 1
+                            ),
+                            1,
+                        )
+                        * 100,
+                        2,
+                    ),
                     "breakdown": breakdown,
                 })
             except Exception as e:
                 return ToolResult.fail(ErrorCode.UNKNOWN, str(e))
 
-        # Fallback path: NCUMappingSystem
-        if ctx.mapper is not None:
-            try:
-                report = ctx.mapper.get_bottleneck_report(top_n=500)
-                match = None
-                for entry in report:
-                    if (
-                        entry["kernel"] == kernel.kernel_name
-                        and entry["file"] == file
-                        and entry["line"] == line
-                    ):
-                        match = entry
-                        break
-                if match is None:
-                    return ToolResult.fail(
-                        ErrorCode.NO_DEBUG_INFO,
-                        f"No stall data for {file}:{line}.",
-                    )
-                return ToolResult.ok({
-                    "file": file,
-                    "line": line,
-                    "dominant_stall": match["dominant_stall"],
-                    "global_pct": match["severity"],
-                    "breakdown": {
-                        k: {"ratio": None, "pct": v}
-                        for k, v in match.get("stall_profile", {}).items()
-                    },
-                })
-            except Exception as e:
-                return ToolResult.fail(ErrorCode.UNKNOWN, str(e))
+        # Correlator tried but no match, and no mapper available
+        if correlator_tried:
+            return ToolResult.fail(
+                ErrorCode.NO_DEBUG_INFO,
+                f"No stall data for {file}:{line}.",
+            )
 
         # No source mapping available at all
         return ToolResult.fail(
@@ -357,9 +454,11 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
     registry.register(ToolDefinition(
         name="get_stall_analysis_for_line",
         description=(
-            "Get warp stall breakdown for a source line. "
-            "Shows each stall reason with percentage. "
-            "Reveals micro-architectural bottleneck at instruction level."
+            "Get complete stall analysis for a source line. Returns: "
+            "stall breakdown (per-category %%), SPI (Stalls Per Instruction; "
+            "-1.0=pure stall), SASS instruction mix, dominant stall/sass, "
+            "include chain (algorithm context). Use after get_performance_hotspots "
+            "to drill into root cause — this ONE call gives the full picture."
         ),
         parameters={
             "type": "object",
@@ -386,14 +485,11 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
     async def get_performance_hotspots(
         kernel_id: int, top_n: int = 10,
     ) -> ToolResult:
-        """Get categorized performance hotspot report with SASS mix.
+        """Get compact performance hotspot overview for a kernel.
 
-        Uses NCUMappingSystem (pre-built source<->SASS mapping) when available.
-        Provides richer analysis than get_source_hotspots:
-        - Categorized stall profile (Memory/Compute/Sync/Scheduling)
-        - SASS instruction mix (what types of instructions on each line)
-        - Representative SASS preview
-        - Severity ranking by PC-sampling or execution frequency
+        Returns severity%, SPI, focus_hint, include_chain, dominant stall/sass
+        for each hotspot. Use get_stall_analysis_for_line to drill into any line
+        for full stall breakdown, SASS mix, and include chain context.
         """
         if ctx.mapper is None:
             return ToolResult.fail(
@@ -438,13 +534,11 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
                         "file": entry["file"],
                         "line": entry["line"],
                         "severity": entry["severity"],
-                        "severity_metric": entry["severity_metric"],
-                        "num_instructions": entry["num_insts"],
+                        "spi": entry["spi"],
+                        "focus_hint": entry["focus_hint"],
+                        "include_chain": entry["include_chain"],
                         "dominant_stall": entry["dominant_stall"],
                         "dominant_sass": entry["dominant_sass"],
-                        "sass_mix": entry["sass_mix"],
-                        "stall_profile": entry["stall_profile"],
-                        "sass_preview": entry["sass_preview"],
                     }
                     for i, entry in enumerate(kernel_report)
                 ],
@@ -457,11 +551,13 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
     registry.register(ToolDefinition(
         name="get_performance_hotspots",
         description=(
-            "Get categorized source-level hotspot report. Shows severity%, "
-            "SASS instruction mix (Memory/Compute/Tensor/Control), stall "
-            "profile (Memory/Compute/Sync/Scheduling), and representative "
-            "SASS instructions for each hotspot line. Richer than "
-            "get_source_hotspots. Use for in-depth performance root cause."
+            "Get categorized source-level hotspot report. Each hotspot shows: "
+            "severity%%, SPI (Stalls Per Instruction; -1.0=pure stall point), "
+            "focus_hint (one-line optimization guidance), include_chain "
+            "(header->kernel .cu inclusion path for algorithm context), "
+            "dominant_stall, dominant_sass. "
+            "For detailed SASS/stall breakdown per line, use "
+            "get_sass_for_source_line and get_stall_analysis_for_line."
         ),
         parameters={
             "type": "object",

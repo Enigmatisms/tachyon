@@ -6,6 +6,8 @@ AnalyzerRegistry. SessionContext centralizes this shared state.
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..models.kernel import KernelReport
@@ -52,6 +54,8 @@ class SessionContext:
 
         Collects paths from kernel.source_files keys and
         mapper.get_mapped_sources(), keeping only existing files.
+        Then expands via #include scanning to discover transitively
+        included headers.
         """
         paths: set[str] = set()
         for k in kernels:
@@ -62,7 +66,40 @@ class SessionContext:
             except Exception:
                 pass
         # Keep only existing files
-        return {p for p in paths if os.path.isfile(p)}
+        paths = {p for p in paths if os.path.isfile(p)}
+        # Expand via #include scanning
+        paths = cls._expand_includes(paths)
+        return paths
+
+    @staticmethod
+    def _expand_includes(paths: set[str], max_depth: int = 3) -> set[str]:
+        """Scan #include directives to find transitively included headers.
+
+        Only tracks ``#include "..."`` (user headers), not
+        ``#include <...>`` (system headers). Limits recursion depth to
+        prevent path explosion.
+        """
+        include_re = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
+        visited: set[str] = set(paths)
+        current = set(paths)
+        for _ in range(max_depth):
+            new_paths: set[str] = set()
+            for f in current:
+                try:
+                    text = Path(f).read_text(errors="ignore")
+                    for m in include_re.finditer(text):
+                        inc = os.path.normpath(
+                            os.path.join(os.path.dirname(f), m.group(1))
+                        )
+                        if inc not in visited and os.path.isfile(inc):
+                            new_paths.add(inc)
+                            visited.add(inc)
+                except (OSError, ValueError):
+                    continue
+            if not new_paths:
+                break
+            current = new_paths
+        return visited
 
     def get_kernel(self, kernel_id: int) -> KernelReport:
         """Get KernelReport by index.

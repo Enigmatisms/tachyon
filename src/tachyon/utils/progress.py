@@ -338,6 +338,121 @@ class NcuSpinner:
             pass
 
 
+# ── Agent spinner (AI analysis) ────────────────────────────────────────
+
+
+class AgentSpinner:
+    """Lightweight live status line for AI analysis.
+
+    Shows a single line: ``⠹ calling get_stall_analysis          12s | 9m48s left``
+    Uses ``transient=True`` so the line auto-clears on ``stop()``.
+
+    Safe to use alongside ``console.print()`` calls — Rich Live pauses
+    rendering while other output is printed, then resumes.
+    """
+
+    def __init__(
+        self,
+        timeout: int = 600,
+        console: Console | None = None,
+    ) -> None:
+        self._timeout = timeout
+        self._own_console = console  # caller-provided override
+        self._start = time.monotonic()
+        self._status = "waiting for LLM"
+        self._spinner = Spinner("dots", style="bold cyan")
+        self._live: Live | None = None
+        self._stopped = False
+
+    def start(self) -> None:
+        if self._stopped:
+            return
+        try:
+            self._start = time.monotonic()
+            c = self._own_console if self._own_console is not None else console
+            self._live = Live(
+                self,
+                console=c,
+                refresh_per_second=4,
+                transient=True,
+            )
+            self._live.start()
+        except Exception:
+            self._live = None
+            _log.debug("Rich Live unavailable for AgentSpinner", exc_info=True)
+
+    def stop(self) -> None:
+        """Stop the live display. Idempotent."""
+        if self._stopped:
+            return
+        self._stopped = True
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:
+                _log.debug("Error stopping AgentSpinner Live", exc_info=True)
+            self._live = None
+
+    def set_status(self, text: str) -> None:
+        """Set arbitrary status text (e.g. ``"waiting for LLM"``)."""
+        self._status = text
+
+    def set_tool(self, name: str) -> None:
+        """Show that a tool is being called (e.g. ``"calling get_source_hotspots"``)."""
+        self._status = f"calling {name}"
+
+    def set_synthesizing(self) -> None:
+        """Set status to synthesizing."""
+        self._status = "synthesizing..."
+
+    # ── internal ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        """Format seconds into a compact human-readable string."""
+        if seconds <= 0:
+            return "0s"
+        t = int(seconds)
+        if t < 60:
+            return f"{t}s"
+        minutes, secs = divmod(t, 60)
+        if minutes < 60:
+            return f"{minutes}m{secs}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h{minutes}m"
+
+    def __rich_console__(self, rconsole: Console, options: Any) -> Any:
+        """Render the single-line status for Rich Live."""
+        try:
+            elapsed = time.monotonic() - self._start
+            remaining = max(0, self._timeout - elapsed)
+
+            grid = Table.grid(padding=(0, 1))
+            grid.add_column(width=2)   # spinner
+            grid.add_column(ratio=1)   # status text
+            grid.add_column(justify="right")  # timer
+
+            grid.add_row(
+                self._spinner,
+                Text(self._status, style="dim"),
+                Text(
+                    f"{self._format_time(elapsed)} | "
+                    f"{self._format_time(remaining)} left",
+                    style="dim",
+                ),
+            )
+            yield grid
+        except Exception:
+            elapsed = time.monotonic() - self._start
+            yield Text(f"  {self._status}  [{elapsed:.0f}s]")
+
+    def __del__(self) -> None:
+        try:
+            self.stop()
+        except Exception:
+            pass
+
+
 # ── Error panel ────────────────────────────────────────────────────────
 
 

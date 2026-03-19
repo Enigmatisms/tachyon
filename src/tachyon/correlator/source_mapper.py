@@ -14,6 +14,8 @@ mapping table at initialization time for O(1) lookups.
 from __future__ import annotations
 
 import logging
+import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -64,6 +66,38 @@ class NCUMappingSystem:
             "smsp__pcsamp_warp_stall_reason_pipe_busy_sample_count",
             "smsp__pcsamp_warp_stall_reason_throttle_sample_count",
             "smsp__pcsamp_warp_stall_reason_drain_sample_count",
+        ],
+    }
+
+    # Legacy metric names (older NCU versions use these instead of CATEGORY_MAP)
+    CATEGORY_MAP_LEGACY: dict[str, list[str]] = {
+        "Memory (DRAM/L2/L1)": [
+            "smsp__pcsamp_warps_issue_stalled_long_scoreboard",
+            "smsp__pcsamp_warps_issue_stalled_lg_throttle",
+            "smsp__pcsamp_warps_issue_stalled_short_scoreboard",
+            "smsp__pcsamp_warps_issue_stalled_mio_throttle",
+            "smsp__pcsamp_warps_issue_stalled_tex_throttle",
+        ],
+        "Compute (ALU/Tensor)": [
+            "smsp__pcsamp_warps_issue_stalled_math_pipe_throttle",
+        ],
+        "Sync / Barrier": [
+            "smsp__pcsamp_warps_issue_stalled_barrier",
+            "smsp__pcsamp_warps_issue_stalled_membar",
+        ],
+        "Instruction / Dependency": [
+            "smsp__pcsamp_warps_issue_stalled_wait",
+            "smsp__pcsamp_warps_issue_stalled_branch_resolving",
+            "smsp__pcsamp_warps_issue_stalled_dispatch_stall",
+            "smsp__pcsamp_warps_issue_stalled_no_instructions",
+        ],
+        "Scheduling / Resource": [
+            "smsp__pcsamp_warps_issue_stalled_not_selected",
+            "smsp__pcsamp_warps_issue_stalled_sleeping",
+            "smsp__pcsamp_warps_issue_stalled_drain",
+            "smsp__pcsamp_warps_issue_stalled_imc_miss",
+            "smsp__pcsamp_warps_issue_stalled_misc",
+            "smsp__pcsamp_warps_issue_stalled_selected",
         ],
     }
 
@@ -118,6 +152,8 @@ class NCUMappingSystem:
         "ncu_report", "report", "_s2as_flat", "_as2s_flat",
         "_kernels", "_get_sass_fast", "_get_src_fast", "_processed_configs",
         "_total_samples_per_kernel", "_total_exec_per_kernel",
+        "_include_tree", "_fwd_include", "_include_chains",
+        "_active_category_map",
     ]
 
     def __init__(self, report_path: str | Path) -> None:
@@ -143,6 +179,10 @@ class NCUMappingSystem:
 
         self._get_sass_fast = self._s2as_flat.get
         self._get_src_fast = self._as2s_flat.get
+
+        self._include_tree: dict[str, list[str]] = {}
+        self._fwd_include: dict[str, list[str]] = {}
+        self._include_chains: dict[str, list[str]] = {}
 
         self._index_all_kernels()
 
@@ -183,9 +223,20 @@ class NCUMappingSystem:
         if not base_metric:
             return
 
-        # Collect all metrics defined in CATEGORY_MAP plus sample count
+        # Detect metric name format: try new-style first, fall back to old-style
+        if not hasattr(self, '_active_category_map'):
+            new_sample = (
+                list(self.CATEGORY_MAP.values())[0][0]
+                if self.CATEGORY_MAP else ""
+            )
+            if new_sample and action.metric_by_name(new_sample):
+                self._active_category_map = self.CATEGORY_MAP
+            else:
+                self._active_category_map = self.CATEGORY_MAP_LEGACY
+
+        # Collect all metrics defined in active category map plus sample count
         all_metric_names = [
-            m for sub in self.CATEGORY_MAP.values() for m in sub
+            m for sub in self._active_category_map.values() for m in sub
         ]
         all_metric_names.append("smsp__pcsamp_sample_count")
         m_objs: dict[str, Any] = {
@@ -262,16 +313,175 @@ class NCUMappingSystem:
         return dict(counts)
 
     # ------------------------------------------------------------------
+    # #include tree (file-level context for agent)
+    # ------------------------------------------------------------------
+
+    _INCLUDE_RE = re.compile(r'^\s*#\s*include\s+"([^"]+)"')
+
+    @staticmethod
+    def _short_path(fpath: str) -> str:
+        """Extract the last 2 path segments for display/matching."""
+        norm = fpath.replace("\\", "/")
+        parts = norm.split("/")
+        return "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+
+    @staticmethod
+    def _is_project_file(fpath: str) -> bool:
+        """Check if a path is a project source file (not system header)."""
+        norm = fpath.replace("\\", "/")
+        first = norm.split("/")[1] if len(norm.split("/")) > 1 else ""
+        return first not in ("usr", "opt", "lib", "etc", "home", "tmp")
+
+    def build_include_tree(
+        self, source_files: dict[str, str],
+    ) -> dict[str, list[str]]:
+        """Parse #include directives and build include maps.
+
+        Returns reverse map: included_file -> [includers].
+        Also populates self._fwd_include: includer -> [included files].
+
+        Note: Only includes files present in source_files. Intermediate
+        headers may be missing from NCU's source_files if no PC maps
+        directly to them, causing chain gaps.
+        """
+        all_project_shorts: set[str] = set()
+        for fp in source_files:
+            if self._is_project_file(fp):
+                all_project_shorts.add(self._short_path(fp))
+
+        fwd: dict[str, list[str]] = defaultdict(list)
+        for fpath, content in source_files.items():
+            if not self._is_project_file(fpath):
+                continue
+            sp = self._short_path(fpath)
+            for line in content.split("\n"):
+                m = self._INCLUDE_RE.match(line)
+                if m:
+                    inc_path = m.group(1)
+                    inc_parts = inc_path.replace("\\", "/").split("/")
+                    for ps in all_project_shorts:
+                        ps_parts = ps.split("/")
+                        if (
+                            len(inc_parts) <= len(ps_parts)
+                            and ps_parts[-len(inc_parts) :] == inc_parts
+                        ):
+                            fwd[sp].append(ps)
+                            break
+
+        rev: dict[str, list[str]] = defaultdict(list)
+        for includer, included_list in fwd.items():
+            for inc in included_list:
+                rev[inc].append(includer)
+
+        self._fwd_include = dict(fwd)
+        return dict(rev)
+
+    def _build_include_chains(self) -> None:
+        """BFS from each .cu file to trace shortest include chain.
+
+        Populates self._include_chains: {file_short: [cu, ..., file_short]}.
+        """
+        cu_files = [
+            sp for sp in self._fwd_include if sp.endswith(".cu")
+        ]
+        if not cu_files:
+            return
+
+        for cu in cu_files:
+            visited: set[str] = {cu}
+            queue: list[tuple[str, list[str]]] = [(cu, [cu])]
+            for cur, path in queue:
+                for inc in self._fwd_include.get(cur, []):
+                    if inc not in visited:
+                        visited.add(inc)
+                        new_path = path + [inc]
+                        if (
+                            inc not in self._include_chains
+                            or len(new_path) < len(self._include_chains[inc])
+                        ):
+                            self._include_chains[inc] = new_path
+                        queue.append((inc, new_path))
+
+    # ------------------------------------------------------------------
+    # Stall computation (shared by SPI and stall_profile)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_stalls(
+        inst_list: list[dict],
+        category_map: dict[str, list[str]] | None = None,
+    ) -> tuple[dict[str, int], int]:
+        """Compute per-category stall breakdown and total stall count.
+
+        Single-pass over *category_map*. Returns (stall_profile, total_stalls).
+        Defaults to CATEGORY_MAP (new-format) when *category_map* is None.
+        """
+        if category_map is None:
+            category_map = NCUMappingSystem.CATEGORY_MAP
+        stall_profile: dict[str, int] = {}
+        total_stalls = 0
+        for cat_name, metric_names in category_map.items():
+            cat_val = 0
+            for e in inst_list:
+                for m in metric_names:
+                    cat_val += e["metrics"].get(m, 0)
+            if cat_val > 0:
+                stall_profile[cat_name] = cat_val
+                total_stalls += cat_val
+        return stall_profile, total_stalls
+
+    # ------------------------------------------------------------------
+    # Focus hint generation (for agent guidance)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _compute_focus_hint(
+        spi: float,
+        severity: float,
+        dominant_stall: str,
+        dominant_sass: str,
+        include_chain: list[str] | None,
+        line_exec: int,
+        line_samples: int,
+    ) -> str:
+        """Generate one-line optimization guidance for the agent."""
+        hints: list[str] = []
+        if spi == -1.0:
+            hints.append("pure stall point (no execution, only stalls)")
+        elif spi > 10:
+            hints.append("extreme stall bottleneck")
+        elif spi > 3:
+            hints.append("stall-bound")
+        if include_chain and len(include_chain) > 2:
+            hints.append("deep inlined utility")
+        if severity > 5 and dominant_stall != "N/A":
+            if "Memory" in dominant_stall:
+                hints.append("memory-bound hotspot")
+            elif "Sync" in dominant_stall or "Barrier" in dominant_stall:
+                hints.append("sync overhead")
+            elif "Compute" in dominant_stall:
+                hints.append("compute-intensive")
+        if severity > 5 and line_samples > 0 and line_exec == 0:
+            hints.append("stall-only hotspot (no exec data)")
+        return "; ".join(hints) if hints else ""
+
+    # ------------------------------------------------------------------
     # Bottleneck / Hotspot Report
     # ------------------------------------------------------------------
 
     def get_bottleneck_report(self, top_n: int = 10) -> list[dict]:
         """Source-level performance hotspot report with categorized metrics.
 
-        For each source line, aggregates:
-        - Severity: (line metric / kernel total) * 100
-        - Stall profile: metrics grouped by CATEGORY_MAP
-        - SASS mix: instruction types on this line
+        Each entry contains:
+          severity       — native % of kernel total (pc_sample or exec_freq)
+          spi            — stalls per instruction; -1.0 = pure stall point
+          focus_hint     — one-line optimization guidance for the agent
+          include_chain  — [cu, ..., file] full include path (None if unavailable)
+          stall_profile  — {category: count} per-category stall breakdown
+          dominant_stall — stall category with highest count
+          sass_mix       — {category: count} instruction type breakdown
+          dominant_sass  — instruction category with highest count
+          sass_preview   — up to 3 representative SASS instructions
 
         Returns list of dicts sorted by severity descending.
         """
@@ -288,7 +498,7 @@ class NCUMappingSystem:
                 e["metrics"].get("inst_executed", 0) for e in inst_list
             )
 
-            # Severity: prefer PC-sampling, fallback to execution count
+            # Severity: native only, no propagation
             if kernel_total_samples > 0 and line_samples > 0:
                 severity = round(
                     (line_samples / kernel_total_samples) * 100, 2
@@ -301,17 +511,19 @@ class NCUMappingSystem:
                 severity = 0.0
                 severity_metric = "none"
 
-            # Categorized stall breakdown (only non-zero categories)
-            stall_profile: dict[str, int] = {}
-            total_stalls = 0
-            for cat_name, metric_names in self.CATEGORY_MAP.items():
-                cat_val = sum(
-                    sum(e["metrics"].get(m, 0) for m in metric_names)
-                    for e in inst_list
-                )
-                if cat_val > 0:
-                    stall_profile[cat_name] = cat_val
-                    total_stalls += cat_val
+            # Stalls: single-pass computation
+            stall_profile, total_stalls = self._compute_stalls(
+                inst_list,
+                getattr(self, '_active_category_map', self.CATEGORY_MAP),
+            )
+
+            # SPI: stalls per instruction
+            if line_exec > 0:
+                spi = round(total_stalls / line_exec, 2)
+            elif total_stalls > 0:
+                spi = -1.0  # pure stall point
+            else:
+                spi = 0.0
 
             dominant_stall = (
                 max(stall_profile, key=stall_profile.get)
@@ -335,12 +547,24 @@ class NCUMappingSystem:
                 if len(sass_preview) >= 3:
                     break
 
+            # Include chain
+            sp = self._short_path(f_path)
+            include_chain = self._include_chains.get(sp)
+
+            # Focus hint
+            focus_hint = self._compute_focus_hint(
+                spi, severity, dominant_stall, dominant_sass,
+                include_chain, line_exec, line_samples,
+            )
+
             raw_reports.append({
                 "file": f_path,
                 "line": l_num,
                 "kernel": k_name,
                 "severity": severity,
                 "severity_metric": severity_metric,
+                "spi": spi,
+                "focus_hint": focus_hint,
                 "num_insts": len(inst_list),
                 "line_exec": line_exec,
                 "line_samples": line_samples,
@@ -350,6 +574,7 @@ class NCUMappingSystem:
                 "stall_total": total_stalls,
                 "sass_mix": sass_mix,
                 "sass_preview": sass_preview,
+                "include_chain": include_chain,
             })
 
         raw_reports.sort(
@@ -361,6 +586,7 @@ class NCUMappingSystem:
         """Human-readable categorized source-level hotspot report.
 
         Groups results by kernel, then ranks source lines by severity.
+        Each entry shows: severity% | SPI | file:line, chain, hint, insts, stalls.
         """
         report = self.get_bottleneck_report(top_n=top_n)
         if not report:
@@ -402,6 +628,30 @@ class NCUMappingSystem:
             else:
                 sev_label = "-"
 
+            # SPI label
+            spi = entry["spi"]
+            if spi == -1.0:
+                spi_str = "SPI INF"
+            elif spi > 0:
+                spi_str = f"SPI {spi}"
+            else:
+                spi_str = ""
+
+            lines.append("")
+            lines.append(
+                f"  #{rank:<3} {sev_label:<12} {spi_str:<10} | {loc}"
+            )
+
+            # Include chain
+            chain = entry.get("include_chain")
+            if chain and len(chain) > 1:
+                lines.append(f"       chain: {' -> '.join(chain)}")
+
+            # Focus hint
+            hint = entry.get("focus_hint", "")
+            if hint:
+                lines.append(f"       hint:  {hint}")
+
             mix_parts = [
                 f"{v} {k.split('/')[0].split('(')[0].lower()}"
                 for k, v in sorted(
@@ -426,9 +676,9 @@ class NCUMappingSystem:
             else:
                 stall_summary = "Stalls: none (no PC-sampling data)"
 
-            lines.append("")
-            lines.append(f"  #{rank:<3} {sev_label:<12} | {loc}")
-            lines.append(f"       {entry['num_insts']} SASS insts | {sass_summary}")
+            lines.append(
+                f"       {entry['num_insts']} insts | {sass_summary}"
+            )
             lines.append(
                 f"       {stall_summary} | dominant: {entry['dominant_stall']}"
             )
@@ -477,6 +727,16 @@ class NCUMappingSystem:
                 if k_name not in self._kernels:
                     self._kernels.append(k_name)
 
+                # Build include tree once (first action with source files)
+                if not self._include_tree:
+                    try:
+                        sf = action.source_files()
+                        if sf:
+                            self._include_tree = self.build_include_tree(sf)
+                            self._build_include_chains()
+                    except Exception:
+                        pass
+
                 self._build_action_maps(action, k_name, temp_s2as)
 
         for tuple_key, inst_list in temp_s2as.items():
@@ -507,3 +767,11 @@ class NCUMappingSystem:
     def get_kernels(self) -> list[str]:
         """Return list of kernel names in the report."""
         return self._kernels
+
+    def get_include_tree(self) -> dict[str, list[str]]:
+        """Return the include tree: {included_file_short: [includer_short, ...]}."""
+        return self._include_tree
+
+    def get_include_chain(self, fpath: str) -> list[str] | None:
+        """Return the full include chain from kernel .cu to this file, or None."""
+        return self._include_chains.get(self._short_path(fpath))

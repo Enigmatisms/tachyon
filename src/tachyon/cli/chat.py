@@ -209,6 +209,7 @@ async def _chat_loop(
         build_kernel_context,
         build_system_prompt,
     )
+    from tachyon.utils.progress import AgentSpinner
 
     kernel_context = build_kernel_context(kernels)
     system_prompt = build_system_prompt(tool_registry, kernel_context)
@@ -244,54 +245,61 @@ async def _chat_loop(
         # Run agent loop — show tool calls in real time for transparency
         text_buffer = []
         tool_calls_made: list[str] = []
-
-        console.print("[dim]Analyzing...[/dim]")
-        async for event in run_agent_loop(
-            backend=backend,
-            registry=tool_registry,
-            user_message=user_input,
-            system_prompt=system_prompt,
-            history=history[-10:],
-            stream=False,
-            timeout=timeout,
-            move_timeout=move_timeout,
-        ):
-            if event.type == "text":
-                text_buffer.append(event.content or "")
-            elif event.type == "thinking":
-                if event.content:
-                    console.print(f"  [dim italic]{event.content[:120]}[/dim italic]")
-            elif event.type == "tool_call":
-                name = event.data["name"] if event.data else "?"
-                args = event.data.get("arguments", {}) if event.data else {}
-                tool_calls_made.append(name)
-                args_short = ", ".join(
-                    f"{k}={v}" for k, v in list(args.items())[:3]
-                )
-                console.print(f"  [cyan]▶ {name}[/cyan]({args_short})")
-            elif event.type == "tool_result":
-                if event.data:
-                    summary = event.data.get("summary", "")
-                    ok = "✓" if event.data.get("success") else "✗"
-                    t = event.data.get("elapsed", 0)
-                    console.print(f"    [dim]{ok} {summary[:140]}  ({t:.2f}s)[/dim]")
-            elif event.type == "system":
-                if event.data and "turn" in event.data:
-                    # Per-turn timing
-                    console.print(f"  [dim]{event.content}[/dim]")
-                elif event.content:
-                    console.print(f"  [yellow]{event.content}[/yellow]")
-            elif event.type == "done":
-                if event.data:
-                    turns = event.data.get("turns", 0)
-                    n_tools = event.data.get("tool_calls", 0)
-                    tokens = event.data.get("total_tokens", 0)
-                    total_elapsed = event.data.get("total_elapsed", 0)
-                    total_tokens += tokens
-                    console.print(
-                        f"  [dim]Done: {turns} turns, {n_tools} tool calls, "
-                        f"{tokens:,} tokens, {total_elapsed:.1f}s[/dim]"
+        spinner = AgentSpinner(timeout=timeout, console=console)
+        spinner.start()
+        try:
+            async for event in run_agent_loop(
+                backend=backend,
+                registry=tool_registry,
+                user_message=user_input,
+                system_prompt=system_prompt,
+                history=history[-10:],
+                stream=False,
+                timeout=timeout,
+                move_timeout=move_timeout,
+            ):
+                if event.type == "text":
+                    spinner.set_synthesizing()
+                    text_buffer.append(event.content or "")
+                elif event.type == "thinking":
+                    if event.content:
+                        console.print(f"  [dim italic]{event.content[:120]}[/dim italic]")
+                elif event.type == "tool_call":
+                    name = event.data["name"] if event.data else "?"
+                    spinner.set_tool(name)
+                    args = event.data.get("arguments", {}) if event.data else {}
+                    tool_calls_made.append(name)
+                    args_short = ", ".join(
+                        f"{k}={v}" for k, v in list(args.items())[:3]
                     )
+                    console.print(f"  [cyan]▶ {name}[/cyan]({args_short})")
+                elif event.type == "tool_result":
+                    spinner.set_status("waiting for LLM")
+                    if event.data:
+                        summary = event.data.get("summary", "")
+                        ok = "✓" if event.data.get("success") else "✗"
+                        t = event.data.get("elapsed", 0)
+                        console.print(f"    [dim]{ok} {summary[:140]}  ({t:.2f}s)[/dim]")
+                elif event.type == "system":
+                    if event.data and "turn" in event.data:
+                        # Per-turn timing
+                        console.print(f"  [dim]{event.content}[/dim]")
+                    elif event.content:
+                        console.print(f"  [yellow]{event.content}[/yellow]")
+                elif event.type == "done":
+                    spinner.stop()
+                    if event.data:
+                        turns = event.data.get("turns", 0)
+                        n_tools = event.data.get("tool_calls", 0)
+                        tokens = event.data.get("total_tokens", 0)
+                        total_elapsed = event.data.get("total_elapsed", 0)
+                        total_tokens += tokens
+                        console.print(
+                            f"  [dim]Done: {turns} turns, {n_tools} tool calls, "
+                            f"{tokens:,} tokens, {total_elapsed:.1f}s[/dim]"
+                        )
+        finally:
+            spinner.stop()
 
         # Render collected text as markdown
         full_text = "".join(text_buffer)

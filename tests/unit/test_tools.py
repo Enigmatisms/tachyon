@@ -1390,18 +1390,11 @@ class TestPerformanceHotspotsTool:
                 "line": 100,
                 "severity": 15.3,
                 "severity_metric": "pc_sample",
-                "num_insts": 42,
-                "line_exec": 1000000,
-                "line_samples": 50000,
+                "spi": 0.04,
+                "focus_hint": "memory-bound hotspot",
+                "include_chain": None,
                 "dominant_stall": "Memory (DRAM/L2/L1)",
                 "dominant_sass": "Memory Load",
-                "stall_profile": {
-                    "Memory (DRAM/L2/L1)": 30000,
-                    "Compute (ALU/Tensor)": 5000,
-                },
-                "stall_total": 35000,
-                "sass_mix": {"Memory Load": 20, "Float Compute": 15, "Register/Misc": 7},
-                "sass_preview": ["LDG.E R0, [R2+0x0]", "FFMA R2, R0, R4, R6"],
             },
             {
                 "kernel": report_compute_bound.kernel_name,
@@ -1409,15 +1402,11 @@ class TestPerformanceHotspotsTool:
                 "line": 120,
                 "severity": 8.1,
                 "severity_metric": "pc_sample",
-                "num_insts": 15,
-                "line_exec": 500000,
-                "line_samples": 25000,
+                "spi": 0.04,
+                "focus_hint": "sync overhead",
+                "include_chain": None,
                 "dominant_stall": "Sync / Barrier",
                 "dominant_sass": "Sync",
-                "stall_profile": {"Sync / Barrier": 20000},
-                "stall_total": 20000,
-                "sass_mix": {"Sync": 5, "Int Compute": 10},
-                "sass_preview": ["BAR.SYNC 0"],
             },
         ]
         mock_mapper._total_samples_per_kernel = {
@@ -1467,10 +1456,14 @@ class TestPerformanceHotspotsTool:
         assert h["file"] == "/path/to/gemm.cu"
         assert h["line"] == 100
         assert h["severity"] == 15.3
+        assert h["spi"] == 0.04
+        assert h["focus_hint"] == "memory-bound hotspot"
         assert h["dominant_stall"] == "Memory (DRAM/L2/L1)"
         assert h["dominant_sass"] == "Memory Load"
-        assert "Memory Load" in h["sass_mix"]
-        assert len(h["sass_preview"]) == 2
+        # sass_mix, stall_profile, sass_preview are NOT in compact response
+        assert "sass_mix" not in h
+        assert "stall_profile" not in h
+        assert "sass_preview" not in h
 
     @pytest.mark.asyncio
     async def test_performance_hotspots_no_mapper(
@@ -1522,10 +1515,30 @@ class TestSassForLineWithMapper:
 
         mock_mapper = MagicMock()
         mock_mapper.get_sass_by_line.return_value = [
-            {"pc": "0x1000", "sass": "LDG.E R0, [R2+0x0]", "file": "gemm.cu", "line": 100, "metrics": {}},
-            {"pc": "0x1004", "sass": "LDG.E R1, [R2+0x40]", "file": "gemm.cu", "line": 100, "metrics": {}},
-            {"pc": "0x1008", "sass": "FFMA R4, R0, R1, R6", "file": "gemm.cu", "line": 100, "metrics": {}},
+            {"pc": "0x1000", "sass": "LDG.E R0, [R2+0x0]", "file": "gemm.cu", "line": 100,
+             "metrics": {
+                 "smsp__pcsamp_sample_count": 3000,
+                 "inst_executed": 10000,
+                 "smsp__pcsamp_warp_stall_reason_memory_pipe_sample_count": 2000,
+                 "smsp__pcsamp_warp_stall_reason_sync_sample_count": 500,
+             }},
+            {"pc": "0x1004", "sass": "LDG.E R1, [R2+0x40]", "file": "gemm.cu", "line": 100,
+             "metrics": {
+                 "smsp__pcsamp_sample_count": 0,
+                 "inst_executed": 5000,
+                 "smsp__pcsamp_warp_stall_reason_memory_pipe_sample_count": 1000,
+             }},
+            {"pc": "0x1008", "sass": "FFMA R4, R0, R1, R6", "file": "gemm.cu", "line": 100,
+             "metrics": {
+                 "smsp__pcsamp_sample_count": 0,
+                 "inst_executed": 8000,
+                 "smsp__pcsamp_warp_stall_reason_math_pipe_sample_count": 300,
+             }},
         ]
+        mock_mapper.get_include_chain.return_value = ["main.cu", "gemm.cu"]
+        mock_mapper._total_samples_per_kernel = {
+            report_compute_bound.kernel_name: 30000,
+        }
 
         ctx = SessionContext(
             kernels=[report_compute_bound],
@@ -1583,6 +1596,119 @@ class TestSassForLineWithMapper:
         )
         # Falls through to correlator path (no correlator) → error
         assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_stall_analysis_with_mapper_full_context(
+        self, registry_with_mapper: ToolRegistry,
+    ):
+        """Mapper-based stall analysis returns complete context: stall + SPI + sass_mix + chain."""
+        result = await registry_with_mapper.execute(
+            "get_stall_analysis_for_line",
+            {"kernel_id": 0, "file": "gemm.cu", "line": 100},
+        )
+        assert result.success is True
+        d = result.data
+        assert d["file"] == "gemm.cu"
+        assert d["line"] == 100
+
+        # SPI: (2000+1000+300) / (10000+5000+8000) = 3800/23000 ≈ 0.17
+        assert d["spi"] == round(3800 / 23000, 2)
+
+        # Include chain
+        assert d["include_chain"] == ["main.cu", "gemm.cu"]
+
+        # SASS mix: 2 Memory Load + 1 Float Compute
+        assert d["sass_mix"]["Memory Load"] == 2
+        assert d["sass_mix"]["Float Compute"] == 1
+        assert d["dominant_sass"] == "Memory Load"
+
+        # Stall breakdown: Memory=3000, Sync=500, Compute=300
+        assert d["dominant_stall"] == "Memory (DRAM/L2/L1)"
+        breakdown = d["breakdown"]
+        assert "Memory (DRAM/L2/L1)" in breakdown
+        assert breakdown["Memory (DRAM/L2/L1)"]["pct"] == round(3000 / 3800 * 100, 1)
+
+        # global_pct: 3000 / 30000 = 10.0
+        assert d["global_pct"] == 10.0
+
+    @pytest.mark.asyncio
+    async def test_stall_analysis_with_mapper_no_match(
+        self, report_compute_bound: KernelReport,
+    ):
+        """Mapper returns empty list for unknown line → NO_DEBUG_INFO."""
+        from unittest.mock import MagicMock
+
+        mock_mapper = MagicMock()
+        mock_mapper.get_sass_by_line.return_value = []  # Always empty
+        mock_mapper._total_samples_per_kernel = {"k": 10000}
+        mock_mapper.get_include_chain.return_value = None
+        ctx = SessionContext(kernels=[report_compute_bound], mapper=mock_mapper)
+        reg = ToolRegistry()
+        register_source_tools(reg, ctx)
+        result = await reg.execute(
+            "get_stall_analysis_for_line",
+            {"kernel_id": 0, "file": "nonexistent.cu", "line": 999},
+        )
+        assert result.success is False
+        assert result.error.code == ErrorCode.NO_DEBUG_INFO
+        assert "nonexistent.cu:999" in result.error.message
+
+    @pytest.mark.asyncio
+    async def test_stall_analysis_with_mapper_no_stalls(
+        self, report_compute_bound: KernelReport,
+    ):
+        """Mapper with instructions but no stall metrics → SPI=0, empty breakdown."""
+        from unittest.mock import MagicMock
+
+        mock_mapper = MagicMock()
+        mock_mapper.get_sass_by_line.return_value = [
+            {"pc": "0x1000", "sass": "FFMA R0, R1, R2, R3", "file": "a.cu", "line": 10,
+             "metrics": {"inst_executed": 5000}},
+        ]
+        mock_mapper._total_samples_per_kernel = {"k": 10000}
+        ctx = SessionContext(kernels=[report_compute_bound], mapper=mock_mapper)
+        reg = ToolRegistry()
+        register_source_tools(reg, ctx)
+        result = await reg.execute(
+            "get_stall_analysis_for_line",
+            {"kernel_id": 0, "file": "a.cu", "line": 10},
+        )
+        assert result.success is True
+        d = result.data
+        assert d["spi"] == 0.0
+        assert d["breakdown"] == {}
+        assert d["dominant_stall"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_stall_analysis_with_mapper_pure_stall(
+        self, report_compute_bound: KernelReport,
+    ):
+        """Mapper with stalls but zero execution → SPI=-1.0 (pure stall point)."""
+        from unittest.mock import MagicMock
+
+        mock_mapper = MagicMock()
+        mock_mapper.get_sass_by_line.return_value = [
+            {"pc": "0x1000", "sass": "BAR.SYNC 0", "file": "a.cu", "line": 20,
+             "metrics": {
+                 "inst_executed": 0,
+                 "smsp__pcsamp_warp_stall_reason_sync_sample_count": 500,
+             }},
+        ]
+        mock_mapper._total_samples_per_kernel = {"k": 10000}
+        mock_mapper.get_include_chain.return_value = None
+        ctx = SessionContext(kernels=[report_compute_bound], mapper=mock_mapper)
+        reg = ToolRegistry()
+        register_source_tools(reg, ctx)
+        result = await reg.execute(
+            "get_stall_analysis_for_line",
+            {"kernel_id": 0, "file": "a.cu", "line": 20},
+        )
+        assert result.success is True
+        d = result.data
+        assert d["spi"] == -1.0
+        assert d["dominant_stall"] == "Sync / Barrier"
+        assert d["include_chain"] is None
+        assert d["sass_mix"]["Sync"] == 1
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━ TestSourceViewTools ━━━━━━━━━━━━━━━━━━━━━

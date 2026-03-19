@@ -422,28 +422,38 @@ def try_ai_analysis(
     import asyncio
 
     from tachyon.agent.loop import run_agent_loop
+    from tachyon.utils.progress import AgentSpinner
 
     async def _run() -> str:
         text_parts: list[str] = []
         tool_calls_made: list[str] = []
-        async for event in run_agent_loop(
-            backend=backend,
-            registry=tool_registry,
-            user_message=user_prompt,
-            system_prompt=system_prompt,
-            stream=False,
-            timeout=config.llm.timeout,
-            move_timeout=config.llm.move_timeout,
-        ):
-            if event.type == "text" and event.content:
-                text_parts.append(event.content)
-            elif event.type == "tool_call":
-                name = event.data["name"] if event.data else "?"
-                tool_calls_made.append(name)
-                if verbose:
-                    console.print(f"  [dim]→ {event.content}[/dim]")
-            elif event.type == "tool_result" and verbose:
-                console.print(f"  [dim]← {event.content}[/dim]")
+        spinner = AgentSpinner(timeout=config.llm.timeout, console=console)
+        spinner.start()
+        try:
+            async for event in run_agent_loop(
+                backend=backend,
+                registry=tool_registry,
+                user_message=user_prompt,
+                system_prompt=system_prompt,
+                stream=False,
+                timeout=config.llm.timeout,
+                move_timeout=config.llm.move_timeout,
+            ):
+                if event.type == "text" and event.content:
+                    spinner.set_synthesizing()
+                    text_parts.append(event.content)
+                elif event.type == "tool_call":
+                    name = event.data["name"] if event.data else "?"
+                    spinner.set_tool(name)
+                    tool_calls_made.append(name)
+                    if verbose:
+                        console.print(f"  [dim]→ {event.content}[/dim]")
+                elif event.type == "tool_result":
+                    spinner.set_status("waiting for LLM")
+                    if verbose:
+                        console.print(f"  [dim]← {event.content}[/dim]")
+        finally:
+            spinner.stop()
         if tool_calls_made:
             console.print(
                 f"  [dim]Agent tool calls: "
