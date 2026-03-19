@@ -272,3 +272,115 @@ class TestMapRuleSeverity:
     def test_string(self):
         from tachyon.reader.ncu_reader import NcuReportReader
         assert NcuReportReader._map_rule_severity("HIGH") == "HIGH"
+
+
+class TestSourceInfoParsing:
+    """Test NcuReportReader.source_info() with various NCU API return types.
+
+    The NCU Python SWIG bindings can return different types depending on
+    NCU version.  source_info() must handle all known formats.
+    """
+
+    def _make_reader(self, mock_action: MagicMock):
+        """Create a reader with a single mocked action."""
+        from tachyon.reader.ncu_reader import NcuReportReader
+        reader = NcuReportReader.__new__(NcuReportReader)
+        reader._actions = {"test_kernel": mock_action}
+        reader._ncu = MagicMock()
+        return reader
+
+    def test_swig_object_with_attributes(self):
+        """SWIG object with .src_file and .src_line attributes."""
+        mock_action = MagicMock()
+        src_obj = MagicMock()
+        src_obj.src_file = "/path/to/kernel.cu"
+        src_obj.src_line = 42
+        mock_action.source_info.return_value = src_obj
+
+        reader = self._make_reader(mock_action)
+        result = reader.source_info(0x1000)
+
+        assert result is not None
+        assert result.file_name == "/path/to/kernel.cu"
+        assert result.line == 42
+
+    def test_tuple_return(self):
+        """Tuple (file_path, line_number) return type."""
+        mock_action = MagicMock()
+        mock_action.source_info.return_value = ("/path/to/kernel.cu", 42)
+
+        reader = self._make_reader(mock_action)
+        result = reader.source_info(0x1000)
+
+        assert result is not None
+        assert result.file_name == "/path/to/kernel.cu"
+        assert result.line == 42
+
+    def test_list_return(self):
+        """List [file_path, line_number] return type."""
+        mock_action = MagicMock()
+        mock_action.source_info.return_value = ["/path/to/kernel.cu", 42]
+
+        reader = self._make_reader(mock_action)
+        result = reader.source_info(0x1000)
+
+        assert result is not None
+        assert result.file_name == "/path/to/kernel.cu"
+        assert result.line == 42
+
+    def test_string_filepath_colon_line(self):
+        """String 'file_path:line_number' return type."""
+        mock_action = MagicMock()
+        mock_action.source_info.return_value = "/path/to/kernel.cu:42"
+
+        reader = self._make_reader(mock_action)
+        result = reader.source_info(0x1000)
+
+        assert result is not None
+        assert result.file_name == "/path/to/kernel.cu"
+        assert result.line == 42
+
+    def test_none_returns_none(self):
+        """None return means no debug info available."""
+        mock_action = MagicMock()
+        mock_action.source_info.return_value = None
+
+        reader = self._make_reader(mock_action)
+        result = reader.source_info(0x1000)
+
+        assert result is None
+
+    def test_exception_returns_none(self):
+        """RuntimeError from NCU API should return None gracefully."""
+        mock_action = MagicMock()
+        mock_action.source_info.side_effect = RuntimeError("PC not found")
+
+        reader = self._make_reader(mock_action)
+        result = reader.source_info(0x1000)
+
+        assert result is None
+
+    def test_kernel_name_selects_action(self):
+        """kernel_name parameter should select the correct action handle."""
+        from tachyon.reader.ncu_reader import NcuReportReader
+
+        mock_action_a = MagicMock()
+        mock_action_a.source_info.return_value = ("kernel_a.cu", 10)
+
+        mock_action_b = MagicMock()
+        mock_action_b.source_info.return_value = ("kernel_b.cu", 20)
+
+        reader = NcuReportReader.__new__(NcuReportReader)
+        reader._actions = {
+            "kernel_a": mock_action_a,
+            "kernel_b": mock_action_b,
+        }
+        reader._ncu = MagicMock()
+
+        result_a = reader.source_info(0x1000, kernel_name="kernel_a")
+        assert result_a.file_name == "kernel_a.cu"
+        assert result_a.line == 10
+
+        result_b = reader.source_info(0x1000, kernel_name="kernel_b")
+        assert result_b.file_name == "kernel_b.cu"
+        assert result_b.line == 20

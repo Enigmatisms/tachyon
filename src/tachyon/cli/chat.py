@@ -16,17 +16,18 @@ import sys
 from typing import TYPE_CHECKING
 
 import click
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
-
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
 
 from tachyon.cli.main import app
 from tachyon.config.settings import TachyonConfig
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from tachyon.analyzers.base import AnalyzerRegistry
     from tachyon.llm.backend import LLMBackend
     from tachyon.tools.context import SessionContext
@@ -83,7 +84,7 @@ def chat(
 
     # Load report
     console.print(f"Loading report: [bold]{report_file}[/bold]...")
-    kernels = _load_report(report_file, config)
+    kernels, reader = _load_report(report_file, config)
     if not kernels:
         console.print("[red]Error: No kernels found in report.[/red]")
         sys.exit(1)
@@ -103,25 +104,77 @@ def chat(
 
     # Set up tools
     from tachyon.analyzers.base import AnalyzerRegistry
+    from tachyon.correlator.source_correlator import SourceCorrelator
     from tachyon.tools.analysis import register_analysis_tools
     from tachyon.tools.context import SessionContext
     from tachyon.tools.data_query import register_data_query_tools
     from tachyon.tools.registry import ToolRegistry
     from tachyon.tools.source import register_source_tools
+    from tachyon.tools.source_view import register_source_view_tools
 
     analyzer_registry = AnalyzerRegistry()
     analyzer_registry.auto_register()
 
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    # Create correlator if we have instanced metrics and reader
+    correlator = None
+    if reader is not None and any(k.instanced_metrics for k in kernels):
+        correlator = SourceCorrelator()
+        _logger.info(
+            "SourceCorrelator initialized: %d kernel(s) with instanced metrics",
+            sum(1 for k in kernels if k.instanced_metrics),
+        )
+    else:
+        # Diagnostic: explain why correlator was NOT created
+        if reader is None:
+            _logger.warning("SourceCorrelator NOT created: reader is None")
+        elif not kernels:
+            _logger.warning("SourceCorrelator NOT created: no kernels loaded")
+        else:
+            n_with_inst = sum(1 for k in kernels if k.instanced_metrics)
+            _logger.warning(
+                "SourceCorrelator NOT created: 0/%d kernels have instanced metrics. "
+                "Source correlation requires '--set detailed' or higher (PC-sampling).",
+                len(kernels),
+            )
+
+    # Initialize NCUMappingSystem independently — it loads data directly via
+    # ncu_report.load_report() and does NOT depend on NcuReportReader.instanced_metrics.
+    mapper = None
+    if reader is not None:
+        try:
+            from tachyon.correlator.source_mapper import NCUMappingSystem
+            mapper = NCUMappingSystem(report_file)
+            _logger.info(
+                "NCUMappingSystem initialized: %d mapped instructions",
+                len(mapper._s2as_flat),
+            )
+        except Exception as e:
+            _logger.warning("NCUMappingSystem NOT created: %s", e)
+
+    # User-facing status: only warn if BOTH correlator AND mapper are unavailable
+    if correlator is None and mapper is None:
+        console.print(
+            "[yellow]Source correlation unavailable[/yellow]: "
+            "no PC-sampled metrics in report. "
+            "Re-profile with [bold]--set detailed[/bold] or [bold]--set full[/bold]."
+        )
+
     session = SessionContext(
         kernels=kernels,
-        action=None,  # No live NCU action handle in analyze mode
-        correlator=None,  # Could be injected if report has instanced metrics
+        action=reader,  # NcuReportReader implements ActionHandle protocol
+        correlator=correlator,
         registry=analyzer_registry,
+        mapper=mapper,
+        allowed_source_paths=SessionContext.build_allowed_source_paths(kernels, mapper),
     )
 
     tool_registry = ToolRegistry()
     register_data_query_tools(tool_registry, session)
     register_source_tools(tool_registry, session)
+    register_source_view_tools(tool_registry, session)
     register_analysis_tools(tool_registry, session)
 
     # Try to create LLM backend
@@ -139,7 +192,7 @@ def chat(
     )
 
     # Run interactive chat loop
-    asyncio.run(_chat_loop(backend, tool_registry, kernels, verbose, config.llm.timeout))
+    asyncio.run(_chat_loop(backend, tool_registry, kernels, verbose, config.llm.timeout, config.llm.move_timeout))
 
 
 async def _chat_loop(
@@ -147,7 +200,8 @@ async def _chat_loop(
     tool_registry: ToolRegistry,
     kernels: list,
     verbose: bool,
-    timeout: int = 120,
+    timeout: int = 600,
+    move_timeout: int = 120,
 ) -> None:
     """Main interactive chat loop."""
     from tachyon.agent.loop import run_agent_loop
@@ -200,6 +254,7 @@ async def _chat_loop(
             history=history[-10:],
             stream=False,
             timeout=timeout,
+            move_timeout=move_timeout,
         ):
             if event.type == "text":
                 text_buffer.append(event.content or "")
@@ -370,19 +425,23 @@ def _show_agent_context(kernels: list, tool_registry: ToolRegistry) -> None:
     console.print()
 
 
-def _load_report(report_file: str, config: TachyonConfig) -> list:
-    """Load .ncu-rep file and return list of KernelReport objects."""
+def _load_report(report_file: str, config: TachyonConfig) -> tuple[list, Any]:
+    """Load .ncu-rep file and return list of KernelReport objects and reader.
+
+    Returns:
+        Tuple of (kernels, reader) where reader implements ActionHandle protocol.
+    """
     try:
         from tachyon.reader.ncu_reader import NcuReportReader
         reader = NcuReportReader(config)
         result = reader.load(report_file)
         if result.success and result.data is not None:
-            return result.data
+            return result.data, reader
         console.print(f"[red]Failed to load report: {result.error}[/red]")
-        return []
+        return [], None
     except Exception as e:
         console.print(f"[red]Failed to load report: {e}[/red]")
-        return []
+        return [], None
 
 
 def _try_create_backend(config: TachyonConfig) -> LLMBackend | None:

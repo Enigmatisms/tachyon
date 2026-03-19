@@ -32,7 +32,7 @@ class TachyonMCPServer:
     def _init_tools(self) -> None:
         """Initialize Tachyon analysis stack and register tools.
 
-        Creates: NcuReportReader -> SessionContext -> ToolRegistry with all 9 tools.
+        Creates: NcuReportReader -> SessionContext -> ToolRegistry with all 12 tools.
         """
         from tachyon.analyzers.base import AnalyzerRegistry
         from tachyon.tools.analysis import register_analysis_tools
@@ -40,8 +40,10 @@ class TachyonMCPServer:
         from tachyon.tools.data_query import register_data_query_tools
         from tachyon.tools.registry import ToolRegistry
         from tachyon.tools.source import register_source_tools
+        from tachyon.tools.source_view import register_source_view_tools
 
         kernels = []
+        reader = None  # Track reader for action handle
         if self._report_path:
             from tachyon.reader.ncu_reader import NcuReportReader
 
@@ -53,16 +55,48 @@ class TachyonMCPServer:
         analyzer_registry = AnalyzerRegistry()
         analyzer_registry.auto_register()
 
+        # Create correlator if we have instanced metrics and reader
+        correlator = None
+        if reader is not None and any(k.instanced_metrics for k in kernels):
+            from tachyon.correlator.source_correlator import SourceCorrelator
+            correlator = SourceCorrelator()
+            logger.info(
+                "SourceCorrelator initialized: %d kernel(s) with instanced metrics",
+                sum(1 for k in kernels if k.instanced_metrics),
+            )
+        else:
+            if reader is not None:
+                logger.warning(
+                    "SourceCorrelator NOT created: no instanced metrics. "
+                    "Source correlation requires '--set detailed' or higher.",
+                )
+
+        # Initialize NCUMappingSystem independently (does NOT depend on instanced_metrics)
+        mapper = None
+        if reader is not None:
+            try:
+                from tachyon.correlator.source_mapper import NCUMappingSystem
+                mapper = NCUMappingSystem(str(self._report_path))
+                logger.info(
+                    "NCUMappingSystem initialized: %d mapped instructions",
+                    len(mapper._s2as_flat),
+                )
+            except Exception as e:
+                logger.warning("NCUMappingSystem NOT created: %s", e)
+
         self._session = SessionContext(
             kernels=kernels,
-            action=None,
-            correlator=None,
+            action=reader,  # NcuReportReader implements ActionHandle protocol
+            correlator=correlator,
             registry=analyzer_registry,
+            mapper=mapper,
+            allowed_source_paths=SessionContext.build_allowed_source_paths(kernels, mapper),
         )
 
         self._tool_registry = ToolRegistry()
         register_data_query_tools(self._tool_registry, self._session)
         register_source_tools(self._tool_registry, self._session)
+        register_source_view_tools(self._tool_registry, self._session)
         register_analysis_tools(self._tool_registry, self._session)
 
     async def run(self) -> None:

@@ -39,15 +39,15 @@ def _make_mock_action(pc_source_map):
     """
     action = MagicMock()
 
-    def _source_info(pc):
+    def _source_info(pc, kernel_name=None):
         if pc in pc_source_map:
             f, l = pc_source_map[pc]
             return SourceInfo(file_name=f, line=l)
         return None
 
     action.source_info.side_effect = _source_info
-    action.sass_by_pc.side_effect = lambda pc: f"SASS@0x{pc:x}"
-    action.ptx_by_pc.side_effect = lambda pc: f"PTX@0x{pc:x}"
+    action.sass_by_pc.side_effect = lambda pc, kernel_name=None: f"SASS@0x{pc:x}"
+    action.ptx_by_pc.side_effect = lambda pc, kernel_name=None: f"PTX@0x{pc:x}"
     return action
 
 

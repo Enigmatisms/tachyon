@@ -64,7 +64,9 @@ async def run_agent_loop(
     history: list[Message] | None = None,
     stream: bool = False,
     context_budget: int = 120_000,
-    timeout: int = 120,
+    timeout: int = 600,
+    move_timeout: int = 120,
+    max_retries: int = 1,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the multi-turn agent loop.
 
@@ -76,7 +78,9 @@ async def run_agent_loop(
         history: Optional conversation history.
         stream: Whether to stream LLM output.
         context_budget: Token budget for context management.
-        timeout: Total timeout in seconds (default 120).
+        timeout: Total timeout in seconds (default 600 = 10 min).
+        move_timeout: Per-move timeout for LLM call (default 120s).
+        max_retries: Retry count for 429/timeout errors (default 1).
 
     Yields:
         AgentEvent instances for the caller to render.
@@ -97,7 +101,7 @@ async def run_agent_loop(
     for turn in range(MAX_TURNS):
         usage.turns = turn + 1
 
-        # Timeout check
+        # Total timeout check
         elapsed = time.monotonic() - t_start
         if elapsed > timeout:
             yield AgentEvent(
@@ -133,31 +137,58 @@ async def run_agent_loop(
                 ),
             ))
 
-        # Call LLM with per-turn timing
+        # Call LLM with per-move timeout and retry
         t_turn = time.monotonic()
-        try:
-            response = await asyncio.wait_for(
-                backend.chat_completion(
-                    messages=messages,
-                    tools=tool_defs if not is_synthesis else None,
-                    tool_choice="none" if is_synthesis else "auto",
-                    stream=stream,
-                    max_tokens=4096,
-                    temperature=0.1,
-                ),
-                timeout=max(timeout - (time.monotonic() - t_start), 5),
-            )
-        except asyncio.TimeoutError:
+        response = None
+        llm_error = None
+        for attempt in range(1 + max_retries):
+            try:
+                response = await asyncio.wait_for(
+                    backend.chat_completion(
+                        messages=messages,
+                        tools=tool_defs if not is_synthesis else None,
+                        tool_choice="none" if is_synthesis else "auto",
+                        stream=stream,
+                        max_tokens=4096,
+                        temperature=0.1,
+                    ),
+                    timeout=move_timeout,
+                )
+                llm_error = None
+                break  # success
+            except asyncio.TimeoutError:
+                llm_error = "timeout"
+                if attempt < max_retries:
+                    yield AgentEvent(
+                        type="system",
+                        content=f"LLM call timed out ({move_timeout}s), "
+                                f"retrying ({attempt + 1}/{max_retries})...",
+                    )
+                    await asyncio.sleep(2)  # brief pause before retry
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str and attempt < max_retries:
+                    llm_error = "rate_limit"
+                    wait = 5 * (attempt + 1)  # 5s, 10s backoff
+                    yield AgentEvent(
+                        type="system",
+                        content=f"LLM rate limited (429), waiting {wait}s "
+                                f"before retry ({attempt + 1}/{max_retries})...",
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    llm_error = err_str
+                    break
+
+        if response is None:
             yield AgentEvent(
                 type="system",
-                content=f"LLM call timed out after {time.monotonic() - t_turn:.1f}s "
-                        f"(total {time.monotonic() - t_start:.1f}s/{timeout}s).",
+                content=f"LLM error ({llm_error}): giving up after "
+                        f"{max_retries + 1} attempts.",
             )
-            break
-        except Exception as e:
-            yield AgentEvent(type="system", content=f"LLM error: {e}")
             yield AgentEvent(type="done", data=_usage_dict(usage, t_start))
             return
+
         llm_elapsed = time.monotonic() - t_turn
 
         # Process response

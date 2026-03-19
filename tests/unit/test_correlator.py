@@ -27,16 +27,16 @@ def _make_mock_action(pc_source_map: dict[int, tuple[str, int]]) -> MagicMock:
     """
     action = MagicMock()
 
-    def _source_info(pc: int):
+    def _source_info(pc: int, kernel_name: str | None = None):
         if pc in pc_source_map:
             f, l = pc_source_map[pc]
             return SourceInfo(file_name=f, line=l)
         return None
 
-    def _sass_by_pc(pc: int):
+    def _sass_by_pc(pc: int, kernel_name: str | None = None):
         return f"SASS@0x{pc:x}"
 
-    def _ptx_by_pc(pc: int):
+    def _ptx_by_pc(pc: int, kernel_name: str | None = None):
         return f"PTX@0x{pc:x}"
 
     action.source_info.side_effect = _source_info

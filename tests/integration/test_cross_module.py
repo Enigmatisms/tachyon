@@ -108,10 +108,11 @@ class TestCrossModule:
         assert isinstance(paths, list)
 
     def test_tool_registry_all_tools(self, full_kernel):
-        """All 9 tools register and have valid MCP/OpenAI/Anthropic schemas."""
+        """All 12 tools register and have valid MCP/OpenAI/Anthropic schemas."""
         from tachyon.tools.analysis import register_analysis_tools
         from tachyon.tools.data_query import register_data_query_tools
         from tachyon.tools.source import register_source_tools
+        from tachyon.tools.source_view import register_source_view_tools
 
         analyzer_registry = AnalyzerRegistry()
         analyzer_registry.auto_register()
@@ -123,10 +124,11 @@ class TestCrossModule:
         tool_registry = ToolRegistry()
         register_data_query_tools(tool_registry, session)
         register_source_tools(tool_registry, session)
+        register_source_view_tools(tool_registry, session)
         register_analysis_tools(tool_registry, session)
 
         names = tool_registry.tool_names()
-        assert len(names) == 9
+        assert len(names) == 12
 
         for td in tool_registry.all_definitions():
             mcp = td.to_mcp()

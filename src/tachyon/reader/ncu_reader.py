@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from tachyon.correlator.source_correlator import SourceInfo
 from tachyon.errors.handler import ErrorCode, ToolResult
 from tachyon.models.kernel import (
     DeviceInfo,
@@ -172,11 +173,21 @@ def _load_ncu_module(config_path: str | None = None) -> Any:
 # NcuReportReader
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ActionHandle implementation
+# ---------------------------------------------------------------------------
+
+
 class NcuReportReader:
     """Reads ``.ncu-rep`` files and produces :class:`KernelReport` instances.
 
     This is the pipeline entry point -- every downstream Analyzer, Correlator,
     and Report layer consumes ``KernelReport`` objects produced here.
+
+    Also implements ActionHandle protocol for source correlation:
+    - source_info(pc): Map PC -> source file + line number
+    - sass_by_pc(pc): Map PC -> SASS disassembly text
+    - ptx_by_pc(pc): Map PC -> PTX intermediate representation text
     """
 
     def __init__(self, config: Any = None) -> None:
@@ -196,6 +207,8 @@ class NcuReportReader:
             elif isinstance(config, str):
                 config_path = config
         self._ncu = _load_ncu_module(config_path=config_path)
+        # Store action handles keyed by kernel name for source correlation
+        self._actions: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -238,12 +251,15 @@ class NcuReportReader:
             )
 
         reports: list[KernelReport] = []
+        self._actions.clear()
         for range_idx in range(context.num_ranges()):
             ncu_range = context.range_by_idx(range_idx)
             for action_idx in range(ncu_range.num_actions()):
                 action = ncu_range.action_by_idx(action_idx)
                 try:
                     report = self._build_kernel_report(action)
+                    # Store action for source correlation by kernel name
+                    self._actions[report.kernel_name] = action
                     reports.append(report)
                 except Exception:
                     logger.warning(
@@ -431,37 +447,59 @@ class NcuReportReader:
         These are metrics with ``num_instances() > 1``, where each instance
         corresponds to a specific PC address via ``correlation_ids()``.
 
-        In M1 we only extract stall-prefixed metrics that
-        :class:`WarpStallAnalyzer` needs.  Full extraction is deferred to
-        M2 when :class:`SourceCorrelator` requires all instanced metrics
-        for three-way mapping.
+        Extracts both warp-stall PC-sampling metrics AND execution count metrics
+        required by SourceCorrelator for hotspot detection.
         """
         instanced: dict[str, list[InstancedMetricValue]] = {}
 
-        # M1 scope: only warp-stall PC-sampling metrics
+        # M1 scope: warp-stall PC-sampling metrics
         stall_prefixes = ("smsp__pcsamp_warps_issue_stalled_",)
+        # M2 scope: execution count metrics (inst_executed, thread_inst_executed_true)
+        exec_names = ("inst_executed", "thread_inst_executed_true")
 
         try:
             metric_names = action.metric_names()
         except (AttributeError, RuntimeError):
             return instanced
 
+        # Debug: log what metrics are available
+        stall_candidates = [n for n in metric_names if any(n.startswith(p) for p in stall_prefixes)]
+        exec_candidates = [n for n in metric_names if n in exec_names]
+        if stall_candidates or exec_candidates:
+            logger.info(
+                "PC-sampling candidates: stall=%d, exec=%d",
+                len(stall_candidates), len(exec_candidates)
+            )
+        else:
+            # Log first few metrics for debugging
+            logger.info("No PC-sampling metrics found. Sample metrics: %s", list(metric_names)[:10])
+
         for name in metric_names:
-            if not any(name.startswith(p) for p in stall_prefixes):
+            # Check stall prefixes
+            is_stall = any(name.startswith(p) for p in stall_prefixes)
+            # Check execution metrics
+            is_exec = name in exec_names
+
+            if not (is_stall or is_exec):
                 continue
             try:
                 m = action.metric_by_name(name)
                 if m is None or not m.has_value() or m.num_instances() <= 1:
+                    # Log why we skip
+                    if m is not None and m.has_value():
+                        logger.debug(f"Skipping {name}: num_instances={m.num_instances()} <= 1")
                     continue
                 corr_ids = m.correlation_ids()
                 values: list[InstancedMetricValue] = []
-                for i in range(corr_ids.size()):
+                for i in range(corr_ids.num_instances()):
                     pc = corr_ids.as_uint64(i)
                     val = m.as_double(i)
                     # Source info lookup deferred to M2 SourceCorrelator
                     values.append(InstancedMetricValue(pc=pc, value=val))
                 instanced[name] = values
-            except (RuntimeError, ValueError, AttributeError):
+                logger.info(f"Extracted instanced metric: {name} ({len(values)} PCs)")
+            except (RuntimeError, ValueError, AttributeError) as e:
+                logger.warning("Failed to extract instanced metric %s: %s", name, e)
                 continue
 
         return instanced
@@ -504,6 +542,129 @@ class NcuReportReader:
         except (AttributeError, RuntimeError):
             pass
         return results
+
+    # ------------------------------------------------------------------
+    # ActionHandle protocol implementation (for SourceCorrelator)
+    # ------------------------------------------------------------------
+
+    def source_info(self, pc: int, kernel_name: str | None = None) -> SourceInfo | None:
+        """Map PC -> source file + line number.
+
+        Args:
+            pc: Program counter address.
+            kernel_name: Optional kernel name to disambiguate. If not provided,
+                uses the first available action.
+
+        Returns:
+            SourceInfo with file_name and line, or None if no debug info.
+        """
+        action = self._get_action(kernel_name)
+        if action is None:
+            return None
+        try:
+            src = action.source_info(pc)
+            if src is not None:
+                # NCU Python SWIG bindings return ISourceInfo object
+                # with .file_name() and .line() methods (callable).
+                # Older versions may use attributes (.src_file/.src_line)
+                # or tuples/lists.
+                if (
+                    hasattr(src, "file_name")
+                    and callable(getattr(src, "file_name", None))
+                    and hasattr(src, "line")
+                    and callable(getattr(src, "line", None))
+                ):
+                    try:
+                        fn = src.file_name()
+                        ln = src.line()
+                        if isinstance(fn, str) and isinstance(ln, (int, str)):
+                            return SourceInfo(
+                                file_name=fn,
+                                line=int(ln),
+                            )
+                    except (TypeError, AttributeError):
+                        pass
+                if hasattr(src, "src_file") and hasattr(src, "src_line"):
+                    return SourceInfo(
+                        file_name=str(src.src_file),
+                        line=int(src.src_line),
+                    )
+                if isinstance(src, (tuple, list)) and len(src) >= 2:
+                    return SourceInfo(
+                        file_name=str(src[0]),
+                        line=int(src[1]),
+                    )
+                # Fallback: try string parsing "filepath:line"
+                s = str(src)
+                colon = s.rfind(":")
+                if colon > 0:
+                    try:
+                        return SourceInfo(
+                            file_name=s[:colon],
+                            line=int(s[colon + 1:]),
+                        )
+                    except ValueError:
+                        pass
+                logger.debug(
+                    "Unable to parse source_info for pc=0x%x: type=%s",
+                    pc, type(src),
+                )
+        except (AttributeError, RuntimeError, TypeError) as e:
+            logger.debug("source_info(pc=0x%x) failed: %s", pc, e)
+        return None
+
+    def sass_by_pc(self, pc: int, kernel_name: str | None = None) -> str | None:
+        """Map PC -> SASS disassembly text.
+
+        Args:
+            pc: Program counter address.
+            kernel_name: Optional kernel name to disambiguate. If not provided,
+                uses the first available action.
+
+        Returns:
+            SASS instruction text, or None if unavailable.
+        """
+        action = self._get_action(kernel_name)
+        if action is None:
+            return None
+        try:
+            sass = action.sass_by_pc(pc)
+            if sass is not None:
+                return str(sass)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        return None
+
+    def ptx_by_pc(self, pc: int, kernel_name: str | None = None) -> str | None:
+        """Map PC -> PTX intermediate representation text.
+
+        Args:
+            pc: Program counter address.
+            kernel_name: Optional kernel name to disambiguate. If not provided,
+                uses the first available action.
+
+        Returns:
+            PTX instruction text, or None if unavailable.
+        """
+        action = self._get_action(kernel_name)
+        if action is None:
+            return None
+        try:
+            ptx = action.ptx_by_pc(pc)
+            if ptx is not None:
+                return str(ptx)
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+        return None
+
+    def _get_action(self, kernel_name: str | None = None) -> Any | None:
+        """Get action handle by kernel name, or first available if not specified."""
+        if kernel_name is not None and kernel_name in self._actions:
+            return self._actions[kernel_name]
+        # Fallback to first available action
+        if self._actions:
+            return next(iter(self._actions.values()))
+        return None
 
     # ------------------------------------------------------------------
     # Static utilities

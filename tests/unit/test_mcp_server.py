@@ -139,7 +139,7 @@ class TestMCPToolSchemas:
         server = TachyonMCPServer(config)
         schemas = server.get_tool_schemas()
 
-        # Should have 9 tools (4 data_query + 2 source + 2 analysis + 1 profile)
+        # Should have 12 tools (4 data_query + 4 source + 2 source_view + 2 analysis)
         # At minimum, the standard set
         assert len(schemas) >= 6
         assert isinstance(schemas, list)

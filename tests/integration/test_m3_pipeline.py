@@ -21,6 +21,7 @@ from tachyon.tools.context import SessionContext
 from tachyon.tools.data_query import register_data_query_tools
 from tachyon.tools.registry import ToolRegistry
 from tachyon.tools.source import register_source_tools
+from tachyon.tools.source_view import register_source_view_tools
 
 
 @pytest.fixture(autouse=True)
@@ -46,10 +47,11 @@ def _build_session(kernels: list[KernelReport]) -> SessionContext:
 
 
 def _build_tool_registry(session: SessionContext) -> ToolRegistry:
-    """Create a ToolRegistry with all 9 tools registered."""
+    """Create a ToolRegistry with all 12 tools registered."""
     registry = ToolRegistry()
     register_data_query_tools(registry, session)
     register_source_tools(registry, session)
+    register_source_view_tools(registry, session)
     register_analysis_tools(registry, session)
     return registry
 

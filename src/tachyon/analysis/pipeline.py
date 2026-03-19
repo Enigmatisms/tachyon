@@ -239,10 +239,12 @@ def build_ai_prompt(
         f"structured rule-engine findings with severity and recommendations.\n"
         f"2. **Call `get_source_hotspots`** for each kernel to find hot source lines "
         f"(requires -lineinfo; if unavailable, skip to step 4).\n"
-        f"3. For each hotspot found, **call `get_sass_for_source_line`** and "
+        f"3. **Call `read_source_file`** for each hotspot file to understand "
+        f"the algorithm at hotspot lines.\n"
+        f"4. For each hotspot found, **call `get_sass_for_source_line`** and "
         f"**`get_stall_analysis_for_line`** to get instruction-level root cause.\n"
-        f"4. **Call `get_optimization_tree`** for the optimization landscape.\n"
-        f"5. Synthesize all evidence into a diagnosis with:\n"
+        f"5. **Call `get_optimization_tree`** for the optimization landscape.\n"
+        f"6. Synthesize all evidence into a diagnosis with:\n"
         f"   - Bottleneck classification (confirmed by tool data)\n"
         f"   - Root cause with evidence citations [metric=value] or [file:line→SASS]\n"
         f"   - Prioritized, concrete recommendations\n"
@@ -301,7 +303,8 @@ def _show_ai_context(
     console.print(
         f"[dim]  Tools available: list_kernels, get_kernel_metrics, "
         f"run_analysis, get_source_hotspots, get_sass_for_source_line, "
-        f"get_stall_analysis_for_line, get_optimization_tree[/dim]"
+        f"get_stall_analysis_for_line, get_optimization_tree, "
+        f"list_source_files, read_source_file[/dim]"
     )
 
 
@@ -309,11 +312,20 @@ def try_ai_analysis(
     reports: list[KernelReport],
     findings_map: dict[str, list[Finding]],
     config: TachyonConfig,
+    reader: Any = None,
     verbose: bool = False,
+    report_path: Path | None = None,
 ) -> str | None:
     """Run AI-enhanced analysis. Returns markdown text or None if unavailable.
 
     Graceful: never raises, returns None on any failure.
+
+    Args:
+        reports: List of KernelReport objects.
+        findings_map: Rule engine findings keyed by kernel name.
+        config: Tachyon configuration.
+        reader: NcuReportReader instance for source correlation (ActionHandle).
+        verbose: Show AI context and tool calls.
     """
     from tachyon.utils.progress import console
 
@@ -347,19 +359,56 @@ def try_ai_analysis(
     from tachyon.tools.data_query import register_data_query_tools
     from tachyon.tools.registry import ToolRegistry
     from tachyon.tools.source import register_source_tools
+    from tachyon.tools.source_view import register_source_view_tools
 
     analyzer_registry = AnalyzerRegistry()
     analyzer_registry.auto_register()
 
+    # Create correlator if we have instanced metrics and reader
+    correlator = None
+    if reader is not None and any(k.instanced_metrics for k in reports):
+        from tachyon.correlator.source_correlator import SourceCorrelator
+        correlator = SourceCorrelator()
+        logger.info(
+            "SourceCorrelator initialized: %d kernel(s) with instanced metrics",
+            sum(1 for k in reports if k.instanced_metrics),
+        )
+    else:
+        if reader is not None:
+            n_with_inst = sum(1 for k in reports if k.instanced_metrics)
+            logger.warning(
+                "SourceCorrelator NOT created: 0/%d kernels have instanced metrics. "
+                "Source correlation requires '--set detailed' or higher.",
+                len(reports),
+            )
+        else:
+            logger.warning("SourceCorrelator NOT created: reader is None")
+
+    # Initialize NCUMappingSystem independently (does NOT depend on instanced_metrics)
+    mapper = None
+    if reader is not None and report_path is not None:
+        try:
+            from tachyon.correlator.source_mapper import NCUMappingSystem
+            mapper = NCUMappingSystem(str(report_path))
+            logger.info(
+                "NCUMappingSystem initialized: %d mapped instructions",
+                len(mapper._s2as_flat),
+            )
+        except Exception as e:
+            logger.warning("NCUMappingSystem NOT created: %s", e)
+
     session = SessionContext(
         kernels=reports,
-        action=None,
-        correlator=None,
+        action=reader,  # NcuReportReader implements ActionHandle protocol
+        correlator=correlator,
         registry=analyzer_registry,
+        mapper=mapper,
+        allowed_source_paths=SessionContext.build_allowed_source_paths(reports, mapper),
     )
     tool_registry = ToolRegistry()
     register_data_query_tools(tool_registry, session)
     register_source_tools(tool_registry, session)
+    register_source_view_tools(tool_registry, session)
     register_analysis_tools(tool_registry, session)
 
     # Build system prompt
@@ -384,6 +433,7 @@ def try_ai_analysis(
             system_prompt=system_prompt,
             stream=False,
             timeout=config.llm.timeout,
+            move_timeout=config.llm.move_timeout,
         ):
             if event.type == "text" and event.content:
                 text_parts.append(event.content)
@@ -496,7 +546,7 @@ def run_analysis(
     if not no_ai:
         console.print()
         console.rule("[bold cyan]AI-Enhanced Analysis[/bold cyan]")
-        ai_text = try_ai_analysis(reports, findings_map, config, verbose=verbose)
+        ai_text = try_ai_analysis(reports, findings_map, config, reader=reader, verbose=verbose, report_path=report_path)
         if ai_text:
             console.print(Markdown(ai_text))
         else:

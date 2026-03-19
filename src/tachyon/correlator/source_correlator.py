@@ -81,21 +81,21 @@ class ActionHandle(Protocol):
     Using a Protocol avoids importing ncu_reader (circular dependency).
     """
 
-    def source_info(self, pc: int) -> SourceInfo | None:
+    def source_info(self, pc: int, kernel_name: str | None = None) -> SourceInfo | None:
         """Map PC -> source file + line number.
 
         Returns None when -lineinfo was not used during compilation.
         """
         ...
 
-    def sass_by_pc(self, pc: int) -> str | None:
+    def sass_by_pc(self, pc: int, kernel_name: str | None = None) -> str | None:
         """Map PC -> SASS disassembly text.
 
         Always available (does not require -lineinfo).
         """
         ...
 
-    def ptx_by_pc(self, pc: int) -> str | None:
+    def ptx_by_pc(self, pc: int, kernel_name: str | None = None) -> str | None:
         """Map PC -> PTX intermediate representation text."""
         ...
 
@@ -258,6 +258,7 @@ class SourceCorrelator:
         self,
         action: ActionHandle,
         instanced_metrics: dict[str, list[tuple[int, float]]],
+        kernel_name: str | None = None,
     ) -> list[SourceHotspot]:
         """Execute the 5-step correlation algorithm.
 
@@ -266,6 +267,9 @@ class SourceCorrelator:
                     source_info, sass_by_pc, ptx_by_pc).
             instanced_metrics: Dict mapping metric name to list of
                     (pc_address, value) tuples from NcuReportReader.
+            kernel_name: Optional kernel name for multi-kernel reports.
+                    Passed through to action methods to select the correct
+                    NCU action handle.
 
         Returns:
             List of SourceHotspot sorted by global_ratio descending,
@@ -286,12 +290,12 @@ class SourceCorrelator:
 
         # -- Step 2: For each PC, get source location + SASS/PTX ------------
         for pc, acc in pc_stats.items():
-            src_info = action.source_info(pc)
+            src_info = action.source_info(pc, kernel_name=kernel_name)
             if src_info is not None:
                 acc.source_file = src_info.file_name
                 acc.source_line = src_info.line
-            acc.sass_text = action.sass_by_pc(pc)
-            acc.ptx_text = action.ptx_by_pc(pc)
+            acc.sass_text = action.sass_by_pc(pc, kernel_name=kernel_name)
+            acc.ptx_text = action.ptx_by_pc(pc, kernel_name=kernel_name)
 
         # -- Step 3: Aggregate by source line --------------------------------
         # Location key: (file, line) for mapped PCs, (None, pc) for unmapped

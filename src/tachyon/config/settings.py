@@ -33,7 +33,8 @@ class LLMConfig:
     base_url: str | None = None
     max_tokens: int = 4096
     temperature: float = 0.1
-    timeout: int = 120                 # agent total timeout in seconds
+    timeout: int = 600                # agent total timeout in seconds (10 min)
+    move_timeout: int = 120           # per-move timeout (LLM call + tool exec)
 
 
 @dataclass

@@ -202,7 +202,9 @@ class AnalyzerRegistry:
         if correlator is not None and action is not None:
             try:
                 instanced = report.instanced_metrics_as_tuples()
-                hotspots = correlator.correlate(action, instanced)
+                hotspots = correlator.correlate(
+                    action, instanced, kernel_name=report.kernel_name,
+                )
             except Exception:
                 logger.warning(
                     "SourceCorrelator failed, continuing without source attribution: %s",
