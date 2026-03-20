@@ -44,6 +44,7 @@ from tachyon.config.settings import TachyonConfig
 @click.option(
     "--quiet", "-q", is_flag=True, help="Show only CRITICAL findings.",
 )
+@click.option("--lang", default=None, help="Language (en/zh).")
 def analyze(
     report_path: Path,
     output: Path | None,
@@ -52,6 +53,7 @@ def analyze(
     model: str | None,
     verbose: bool,
     quiet: bool,
+    lang: str | None,
 ) -> None:
     """Analyze an existing NCU report file.
 
@@ -70,6 +72,8 @@ def analyze(
     config = TachyonConfig.load()
     if model:
         config.apply_cli_overrides(model=model)
+    if lang:
+        config.output.lang = lang
 
     from tachyon.analysis.pipeline import run_analysis
 

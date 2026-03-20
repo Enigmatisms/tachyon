@@ -1,3 +1,6 @@
+[prompt.output_lang]
+text = "使用中文回复。用户用中文提问时必须用中文回答，技术术语可保留英文原文（如 kernel、warp、stall 等）。"
+
 [report]
 executive_summary = "执行摘要"
 top_findings = "关键发现"
@@ -33,3 +36,93 @@ action = "通过分块 (tiling) 或 L2 持久化提示改善空间/时间局部�
 [warning]
 no_debug_info = "源码映射不可用：kernel 编译时未包含调试信息。添加 -lineinfo 以获得完整源码归因。"
 partial_debug_info = "{degraded_count}/{total_count} 个热点缺少源码映射。请使用 -lineinfo 重新编译。"
+
+[stage.name]
+one = "第一阶段：指标分析"
+two = "第二阶段：源码归因"
+three = "第三阶段：综合改进方案"
+combined = "第二阶段：深度分析"
+
+[stage.1.metrics]
+prompt = """## 第一阶段：指标分析
+
+上面是预计算的 kernel 指标和规则引擎发现。请在此基础上执行深入分析：
+
+1. 调用 `list_kernels` 和 `get_kernel_summary` 查看所有 kernel 的关键指标
+2. 调用 `run_analysis` 获取每个 kernel 的规则引擎结构化分析
+3. 调用 `get_optimization_tree` 查看优化路径全貌
+4. 重点分析：
+   - SM 吞吐 / DRAM 吞吐 / 占用率等 roofline 指标
+   - 规则引擎的 CRITICAL/WARNING 发现及具体数值
+   - 每个 kernel 的主要瓶颈类型（compute-bound / memory-bound / latency-bound）
+
+**必须对每个 kernel 调用 `run_analysis`，没有 tool evidence 的输出视为不完整。**
+
+**只做指标层面的分析，不要调用源码相关工具（get_performance_hotspots, get_sass_for_source_line, get_stall_analysis_for_line, read_source_file）。**
+
+输出格式：按 kernel 分组，每个 kernel 一段分析。
+末尾给出你认为最值得关注的 top-3 hotspot（kernel_id + 简要原因）。"""
+
+[stage.2.source]
+prompt = """## 第二阶段：源码归因
+
+基于上一阶段的指标分析，现在溯源到源码层面：
+
+1. 对上阶段识别的 top hotspot，调用 `get_performance_hotspots` 获取源码级热点
+2. 对每个重要热点，调用 `get_stall_analysis_for_line` 获取 stall 细分和 SPI
+3. 如需查看具体 SASS 指令，调用 `get_sass_for_source_line`
+4. 如需查看源码上下文，调用 `read_source_file`
+
+**必须调用 `get_performance_hotspots` 且对 top-2 hotspot 文件调用 `read_source_file`，不要仅凭记忆分析。**
+
+输出要求：
+- 每个热点：file:line + severity% + SPI + dominant_stall + dominant_sass + include_chain
+- 解释 stall 的根因（指令依赖？内存延迟？barrier？）
+- 区分"表面现象"和"根因"（例如 scoreboard stall 的根因可能是 L2 miss 导致的长依赖链）
+- 末尾列出你认为最关键的优化机会（top-3），按影响程度排序"""
+
+[stage.3.recommend]
+prompt = """## 第三阶段：综合改进方案
+
+基于前两个阶段的分析结果，给出综合优化方案。请先回顾上面的所有分析数据。
+
+如果上一阶段遗漏了关键热点的源码分析，请继续调用工具补充数据。
+
+1. 针对每个优化机会，给出：
+   - 问题描述（具体到 file:line 和指标值）
+   - 根因分析（引用 SPI、stall breakdown、SASS evidence）
+   - 具体优化建议（给出代码示例或伪代码）
+   - 预期效果（定量估计改善幅度）
+   - 优先级（HIGH / MEDIUM / LOW）
+2. 如果有多个优化方向，说明它们之间的依赖关系
+3. 给出验证方案：应该关注哪些指标来验证优化效果
+
+**每条建议必须引用至少一个 evidence source（metric 值、SPI 数值或 SASS 指令）。**
+
+输出格式：按优先级排序的编号列表，每条包含 [问题] [根因] [方案] [预期效果] [优先级]。"""
+
+[stage.context]
+previous = "以下是前面阶段的分析结果（完整内容），请在此基础上继续："
+
+[prompt.focus.compute]
+text = """主要瓶颈为 **计算 (COMPUTE)**，重点关注：
+- 指令级低效（FP32 vs FP16/TF32、分支发散）
+- Tensor Core / WMMA 利用机会
+- 算法复杂度优化"""
+
+[prompt.focus.memory]
+text = """主要瓶颈为 **内存 (MEMORY)**，重点关注：
+- 全局内存合并访问模式（SoA vs AoS、对齐）
+- 共享内存 bank 冲突和填充
+- L2 缓存利用率和内存流量优化"""
+
+[prompt.focus.latency]
+text = """主要瓶颈为 **延迟 (LATENCY)**，重点关注：
+- 占用率限制因素（寄存器、共享内存、block 大小）
+- Warp 停顿原因（长 scoreboard、barrier、依赖链）
+- 同步开销和指令级并行"""
+
+[prompt.focus.general]
+text = """检测到多种瓶颈类型，提供综合分析：
+- 确定第一优先优化项
+- 对每个发现解释原因和修复方法"""

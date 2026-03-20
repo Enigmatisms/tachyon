@@ -1,3 +1,6 @@
+[prompt.output_lang]
+text = "Respond in English (简体中文). Use the same language as the user's query."
+
 [report]
 executive_summary = "Executive Summary"
 top_findings = "Top Findings"
@@ -33,3 +36,93 @@ action = "Improve spatial/temporal locality through tiling or L2 persistence hin
 [warning]
 no_debug_info = "Source mapping unavailable: kernel compiled without debug info. Add -lineinfo for full source attribution."
 partial_debug_info = "{degraded_count}/{total_count} hotspots lack source mapping. Recompile with -lineinfo."
+
+[stage.name]
+one = "Stage 1: Metric Analysis"
+two = "Stage 2: Source Attribution"
+three = "Stage 3: Optimization Plan"
+combined = "Stage 2: Deep Analysis"
+
+[stage.1.metrics]
+prompt = """## Stage 1: Metric Analysis
+
+Above are pre-computed kernel metrics and rule engine findings. Perform deep analysis on this basis:
+
+1. Call `list_kernels` and `get_kernel_summary` to review key metrics for all kernels
+2. Call `run_analysis` for each kernel to get structured rule-engine analysis
+3. Call `get_optimization_tree` to see the full optimization landscape
+4. Focus on:
+   - Roofline metrics: SM throughput / DRAM throughput / occupancy
+   - CRITICAL/WARNING findings from the rule engine with specific values
+   - Primary bottleneck type for each kernel (compute-bound / memory-bound / latency-bound)
+
+**You MUST call `run_analysis` for each kernel. Output without tool evidence is considered incomplete.**
+
+**Do NOT call source-related tools (get_performance_hotspots, get_sass_for_source_line, get_stall_analysis_for_line, read_source_file).**
+
+Output format: Group by kernel, one analysis section per kernel.
+At the end, list the top-3 hotspots you consider most noteworthy (kernel_id + brief reason)."""
+
+[stage.2.source]
+prompt = """## Stage 2: Source Attribution
+
+Based on the metric analysis from the previous stage, now trace back to source code:
+
+1. For the top hotspots identified, call `get_performance_hotspots` to get source-level hotspots
+2. For each important hotspot, call `get_stall_analysis_for_line` to get stall breakdown and SPI
+3. If specific SASS instructions are needed, call `get_sass_for_source_line`
+4. To view source context, call `read_source_file`
+
+**You MUST call `get_performance_hotspots` and for the top-2 hotspot files, call `read_source_file`. Do not analyze from memory alone.**
+
+Output requirements:
+- Per hotspot: file:line + severity% + SPI + dominant_stall + dominant_sass + include_chain
+- Explain the root cause of stalls (instruction dependency? memory latency? barrier?)
+- Distinguish "surface symptoms" from "root causes" (e.g., scoreboard stall root cause may be long dependency chain from L2 miss)
+- At the end, list the top-3 most critical optimization opportunities, sorted by impact"""
+
+[stage.3.recommend]
+prompt = """## Stage 3: Optimization Plan
+
+Based on the analysis results from the first two stages, provide a comprehensive optimization plan. Review all analysis data above first.
+
+If the previous stage missed critical hotspots, continue calling tools to supplement data.
+
+1. For each optimization opportunity, provide:
+   - Problem description (specific to file:line and metric values)
+   - Root cause analysis (citing SPI, stall breakdown, SASS evidence)
+   - Specific optimization suggestion (with code examples or pseudocode)
+   - Expected effect (quantitative estimate of improvement)
+   - Priority (HIGH / MEDIUM / LOW)
+2. If there are multiple optimization directions, explain dependencies between them
+3. Provide a verification plan: which metrics to monitor to validate optimization effect
+
+**Each recommendation MUST cite at least one evidence source (metric value, SPI number, or SASS instruction).**
+
+Output format: Numbered list sorted by priority, each containing [Problem] [Root Cause] [Solution] [Expected Effect] [Priority]."""
+
+[stage.context]
+previous = "Below are the analysis results from previous stages (complete content). Continue building on this:"
+
+[prompt.focus.compute]
+text = """The dominant bottleneck is **COMPUTE**. Focus on:
+- Instruction-level inefficiencies (FP32 vs FP16/TF32, divergent branches)
+- Tensor Core / WMMA utilization opportunities
+- Algorithmic complexity reduction"""
+
+[prompt.focus.memory]
+text = """The dominant bottleneck is **MEMORY**. Focus on:
+- Global memory coalescing patterns (SoA vs AoS, alignment)
+- Shared memory bank conflicts and padding
+- L2 cache utilization and memory traffic reduction"""
+
+[prompt.focus.latency]
+text = """The dominant bottleneck is **LATENCY**. Focus on:
+- Occupancy limiters (registers, shared memory, block size)
+- Warp stall reasons (long scoreboard, barrier, dependency)
+- Synchronization overhead and instruction-level overlap"""
+
+[prompt.focus.general]
+text = """Multiple bottleneck types detected. Provide a comprehensive analysis:
+- Identify the #1 priority optimization
+- For each finding, explain WHY and HOW to fix"""

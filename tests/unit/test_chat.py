@@ -76,6 +76,12 @@ class TestChatHelpers:
         result = _handle_command("/foobar", [sample_kernel], None, 0)
         assert result is True
 
+    def test_handle_command_next(self, sample_kernel):
+        """/next command returns 'NEXT_STAGE'."""
+        from tachyon.cli.chat import _handle_command
+        result = _handle_command("/next", [sample_kernel], None, 0)
+        assert result == "NEXT_STAGE"
+
     def test_handle_command_tree(self, sample_kernel):
         """'/tree 0' shows optimization tree."""
         from tachyon.cli.chat import _handle_command

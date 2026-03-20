@@ -133,11 +133,19 @@ def run_rule_engine(
 def build_ai_prompt(
     reports: list[KernelReport],
     findings_map: dict[str, list[Finding]],
+    *,
+    instructions: bool = True,
 ) -> str:
     """Build a focused AI prompt from kernel metrics + rule-engine findings.
 
     The prompt provides all pre-computed data AND explicitly instructs the
     agent to call tools for deeper investigation (source, SASS, stalls).
+
+    Args:
+        reports: List of KernelReport objects.
+        findings_map: Rule engine findings keyed by kernel name.
+        instructions: When False, return only the data section (for deep
+                      mode where stage-specific prompts control tool-calling).
     """
     parts: list[str] = []
     category_counts: dict[str, int] = defaultdict(int)
@@ -196,38 +204,45 @@ def build_ai_prompt(
 
     findings_text = "\n".join(parts)
 
+    if not instructions:
+        return findings_text
+
     # Determine dominant bottleneck for prompt specialization
     total = sum(category_counts.values()) or 1
     dominant = max(category_counts, key=category_counts.get) if category_counts else "general"  # type: ignore[arg-type]
     ratio = category_counts.get(dominant, 0) / total
 
     if ratio > 0.5 and dominant in ("compute",):
-        focus = (
+        from tachyon.i18n import t
+        focus = t("prompt.focus.compute.text", fallback=(
             "The dominant bottleneck is **COMPUTE**. Focus on:\n"
             "- Instruction-level inefficiencies (FP32 vs FP16/TF32, divergent branches)\n"
             "- Tensor Core / WMMA utilization opportunities\n"
             "- Algorithmic complexity reduction"
-        )
+        ))
     elif ratio > 0.5 and dominant in ("memory",):
-        focus = (
+        from tachyon.i18n import t
+        focus = t("prompt.focus.memory.text", fallback=(
             "The dominant bottleneck is **MEMORY**. Focus on:\n"
             "- Global memory coalescing patterns (SoA vs AoS, alignment)\n"
             "- Shared memory bank conflicts and padding\n"
             "- L2 cache utilization and memory traffic reduction"
-        )
+        ))
     elif ratio > 0.5 and dominant in ("latency",):
-        focus = (
+        from tachyon.i18n import t
+        focus = t("prompt.focus.latency.text", fallback=(
             "The dominant bottleneck is **LATENCY**. Focus on:\n"
             "- Occupancy limiters (registers, shared memory, block size)\n"
             "- Warp stall reasons (long scoreboard, barrier, dependency)\n"
             "- Synchronization overhead and instruction-level overlap"
-        )
+        ))
     else:
-        focus = (
+        from tachyon.i18n import t
+        focus = t("prompt.focus.general.text", fallback=(
             "Multiple bottleneck types detected. Provide a comprehensive analysis:\n"
             "- Identify the #1 priority optimization\n"
             "- For each finding, explain WHY and HOW to fix"
-        )
+        ))
 
     # Build the instruction section with explicit tool-calling directives
     kernel_ids = list(range(len(reports)))
@@ -315,6 +330,7 @@ def try_ai_analysis(
     reader: Any = None,
     verbose: bool = False,
     report_path: Path | None = None,
+    deep: bool = False,
 ) -> str | None:
     """Run AI-enhanced analysis. Returns markdown text or None if unavailable.
 
@@ -326,12 +342,21 @@ def try_ai_analysis(
         config: Tachyon configuration.
         reader: NcuReportReader instance for source correlation (ActionHandle).
         verbose: Show AI context and tool calls.
+        deep: Use multi-stage deep analysis (3 stages for profile).
     """
     from tachyon.utils.progress import console
+
+    # Ensure i18n is initialized (idempotent call)
+    import tachyon.i18n as i18n
+    i18n.init(config.output.lang)
 
     user_prompt = build_ai_prompt(reports, findings_map)
     if not user_prompt:
         return None
+
+    # For deep mode: build a data-only prompt (no tool-calling instructions)
+    # so that stage-specific prompts can control tool usage without conflict
+    data_only_prompt = build_ai_prompt(reports, findings_map, instructions=False) if deep else user_prompt
 
     # Transparency: show excerpt of what's being sent to AI
     _show_ai_context(reports, findings_map, verbose)
@@ -418,13 +443,14 @@ def try_ai_analysis(
         tool_registry, build_kernel_context(reports)
     )
 
-    # Run agent loop (single-shot)
+    # Run agent loop (single-shot or multi-stage deep)
     import asyncio
 
     from tachyon.agent.loop import run_agent_loop
     from tachyon.utils.progress import AgentSpinner
 
-    async def _run() -> str:
+    async def _run_single() -> str:
+        """Single-shot agent loop (default behavior)."""
         text_parts: list[str] = []
         tool_calls_made: list[str] = []
         spinner = AgentSpinner(timeout=config.llm.timeout, console=console)
@@ -461,8 +487,39 @@ def try_ai_analysis(
             )
         return "".join(text_parts)
 
+    async def _run_deep() -> str:
+        """Multi-stage deep analysis."""
+        from tachyon.analysis.stages import build_stage_prompts, run_staged_analysis
+
+        stage_specs = build_stage_prompts(mode="profile")
+
+        def _render(stage_idx: int, stage_name: str, text: str) -> None:
+            if verbose:
+                console.print(f"  [dim]  [{stage_name}] {text[:100]}[/dim]")
+
+        stage_results = await run_staged_analysis(
+            backend=backend,
+            registry=tool_registry,
+            user_prompt=data_only_prompt,
+            system_prompt=system_prompt,
+            stage_specs=stage_specs,
+            timeout_per_stage=config.llm.timeout,
+            move_timeout=config.llm.move_timeout,
+            render_fn=_render,
+        )
+
+        rendered_parts: list[str] = []
+        for spec, text in zip(stage_specs, stage_results):
+            console.rule(f"[bold cyan]{spec.name}[/bold cyan]")
+            rendered_parts.append(text)
+
+        return "\n\n".join(rendered_parts)
+
     try:
-        return asyncio.run(_run()) or None
+        if deep:
+            return asyncio.run(_run_deep()) or None
+        else:
+            return asyncio.run(_run_single()) or None
     except Exception as e:
         logger.warning("AI analysis failed: %s", e)
         if verbose:
@@ -483,6 +540,7 @@ def run_analysis(
     quiet: bool = False,
     no_ai: bool = False,
     output_file: Path | None = None,
+    deep: bool = False,
 ) -> None:
     """Complete analysis pipeline: load → merge → rules → render → AI.
 
@@ -497,6 +555,7 @@ def run_analysis(
         quiet: Show only CRITICAL findings.
         no_ai: Skip AI-enhanced analysis.
         output_file: Write output to file instead of stdout.
+        deep: Use multi-stage deep analysis (profile mode only).
     """
     import sys
 
@@ -556,7 +615,7 @@ def run_analysis(
     if not no_ai:
         console.print()
         console.rule("[bold cyan]AI-Enhanced Analysis[/bold cyan]")
-        ai_text = try_ai_analysis(reports, findings_map, config, reader=reader, verbose=verbose, report_path=report_path)
+        ai_text = try_ai_analysis(reports, findings_map, config, reader=reader, verbose=verbose, report_path=report_path, deep=deep)
         if ai_text:
             console.print(Markdown(ai_text))
         else:

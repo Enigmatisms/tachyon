@@ -68,6 +68,8 @@ from tachyon.config.settings import TachyonConfig
     help="Save outputs to this directory.",
 )
 @click.option("--no-ai", is_flag=True, help="Skip AI analysis (Rule-Only).")
+@click.option("--deep", is_flag=True, help="Multi-stage deep analysis (3 stages).")
+@click.option("--lang", default=None, help="Language (en/zh).")
 @click.option(
     "--model", type=str, default=None, help="LLM model override.",
 )
@@ -85,6 +87,8 @@ def profile(
     ncu_metrics: str | None,
     output: Path | None,
     no_ai: bool,
+    deep: bool,
+    lang: str | None,
     model: str | None,
     verbose: bool,
 ) -> None:
@@ -105,6 +109,8 @@ def profile(
 
     config = TachyonConfig.load()
     config.apply_cli_overrides(model=model, strategy=strategy)
+    if lang:
+        config.output.lang = lang
 
     from tachyon.profiler.ncu_profiler import ProfilingStrategy
     from tachyon.profiler.pipeline import run_profiling_pipeline
@@ -171,4 +177,5 @@ def profile(
         verbose=verbose,
         no_ai=no_ai,
         output_file=(output / "analysis.txt") if output else None,
+        deep=deep,
     )

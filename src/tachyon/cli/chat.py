@@ -48,6 +48,7 @@ console = Console()
 @click.option("--kernel", "-k", default=None, help="Filter kernels by name (glob pattern, e.g. 'matmul*').")
 @click.option("--lang", default=None, help="Language (en/zh)")
 @click.option("--verbose", "-v", is_flag=True, help="Show tool calls and debug info")
+@click.option("--deep", is_flag=True, help="Deep analysis mode with staged output (2 stages).")
 def chat(
     report_file: str,
     model: str | None,
@@ -56,6 +57,7 @@ def chat(
     kernel: str | None,
     lang: str | None,
     verbose: bool,
+    deep: bool,
 ) -> None:
     """Interactive AI-enhanced CUDA performance analysis.
 
@@ -192,7 +194,11 @@ def chat(
     )
 
     # Run interactive chat loop
-    asyncio.run(_chat_loop(backend, tool_registry, kernels, verbose, config.llm.timeout, config.llm.move_timeout))
+    asyncio.run(_chat_loop(
+        backend, tool_registry, kernels, verbose,
+        config.llm.timeout, config.llm.move_timeout,
+        deep=deep,
+    ))
 
 
 async def _chat_loop(
@@ -202,6 +208,7 @@ async def _chat_loop(
     verbose: bool,
     timeout: int = 600,
     move_timeout: int = 120,
+    deep: bool = False,
 ) -> None:
     """Main interactive chat loop."""
     from tachyon.agent.loop import run_agent_loop
@@ -221,6 +228,16 @@ async def _chat_loop(
     total_tokens = 0
     prompt_session: PromptSession[str] = PromptSession()
 
+    # Deep mode state
+    deep_stage = 0  # 0=not started, 1=metrics, 2=source+recommend, 3=done
+    deep_auto_prompt_sent = False
+
+    if deep:
+        from tachyon.analysis.stages import build_stage_prompts
+        _stage_specs = build_stage_prompts(mode="chat")
+        console.print("[cyan]Deep analysis mode[/cyan]: Stage 1/2 — Metric Analysis")
+        console.print("[dim]Type /next to jump to next stage, /help for commands.[/dim]")
+
     while True:
         try:
             user_input = (await prompt_session.prompt_async(
@@ -235,12 +252,34 @@ async def _chat_loop(
 
         # Handle special commands
         if user_input.startswith("/"):
-            should_continue = _handle_command(
+            cmd_result = _handle_command(
                 user_input, kernels, tool_registry, total_tokens,
             )
-            if should_continue is None:
+            if cmd_result is None:
                 break  # /quit
-            continue
+            if cmd_result == "NEXT_STAGE" and deep:
+                # Manually advance to next stage
+                if deep_stage < len(_stage_specs):
+                    deep_stage += 1
+                    if deep_stage <= len(_stage_specs):
+                        spec = _stage_specs[deep_stage - 1]
+                        console.rule(f"[bold cyan]{spec.name}[/bold cyan]")
+                        user_input = spec.prompt
+                        # Fall through to agent loop
+                    else:
+                        console.print("[dim]All stages complete.[/dim]")
+                        continue
+                else:
+                    console.print("[dim]All stages complete.[/dim]")
+                    continue
+            else:
+                continue
+
+        # Deep mode: auto-inject stage prompt on first user message
+        if deep and deep_stage == 0 and not deep_auto_prompt_sent:
+            deep_auto_prompt_sent = True
+            deep_stage = 1
+            user_input = _stage_specs[0].prompt
 
         # Run agent loop — show tool calls in real time for transparency
         text_buffer = []
@@ -317,14 +356,22 @@ async def _chat_loop(
         if full_text:
             history.append(Message(role=Role.ASSISTANT, content=full_text))
 
+        # Deep mode: prompt for stage transition after agent completes
+        if deep and deep_stage == 1 and full_text:
+            console.print(
+                "\n[dim]Stage 1 complete. Type [bold]/next[/bold] to proceed to "
+                "Stage 2 (Source Attribution + Recommendations), "
+                "or ask follow-up questions.[/dim]"
+            )
+
 
 def _handle_command(
     cmd: str,
     kernels: list,
     registry: ToolRegistry,
     total_tokens: int,
-) -> bool | None:
-    """Handle special /commands. Returns None for /quit, True otherwise."""
+) -> bool | None | str:
+    """Handle special /commands. Returns None for /quit, True otherwise, 'NEXT_STAGE' for /next."""
     parts = cmd.split()
     command = parts[0].lower()
 
@@ -338,6 +385,7 @@ def _handle_command(
             "[bold]/kernels[/bold] — List loaded kernels\n"
             "[bold]/tree <id>[/bold] — Show OptTree for kernel\n"
             "[bold]/tokens[/bold] — Show token usage\n"
+            "[bold]/next[/bold] — Jump to next analysis stage (deep mode)\n"
             "[bold]/quit[/bold] — Exit chat",
             title="Commands",
         ))
@@ -357,6 +405,9 @@ def _handle_command(
     if command == "/tokens":
         console.print(f"Total tokens used: [bold]{total_tokens:,}[/bold]")
         return True
+
+    if command == "/next":
+        return "NEXT_STAGE"
 
     console.print(f"[red]Unknown command: {command}[/red]. Type /help.")
     return True

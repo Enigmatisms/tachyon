@@ -166,3 +166,79 @@ class TestEdgeCases:
         monkeypatch.setattr("locale.getlocale", lambda: (None, None))
         i18n.init(None)
         assert i18n.current_lang() == "en"
+
+
+# ===================================================================
+# TestStageI18n — verify new stage/prompt/focus keys exist
+# ===================================================================
+
+class TestStageI18n:
+    """Verify i18n keys added for stage prompts and focus strings."""
+
+    # Keys that must exist in both en and zh packs
+    _REQUIRED_KEYS = [
+        "stage.name.one",
+        "stage.name.two",
+        "stage.name.three",
+        "stage.name.combined",
+        "stage.1.metrics.prompt",
+        "stage.2.source.prompt",
+        "stage.3.recommend.prompt",
+        "stage.context.previous",
+        "prompt.focus.compute.text",
+        "prompt.focus.memory.text",
+        "prompt.focus.latency.text",
+        "prompt.focus.general.text",
+    ]
+
+    def test_all_keys_exist_in_en(self):
+        i18n.init("en")
+        for key in self._REQUIRED_KEYS:
+            assert i18n.t(key) != key, f"Missing en key: {key}"
+
+    def test_all_keys_exist_in_zh(self):
+        i18n.init("zh")
+        for key in self._REQUIRED_KEYS:
+            val = i18n.t(key)
+            assert val != key, f"Missing zh key: {key}"
+            # Verify zh value is actually Chinese (not English fallback)
+            if key.startswith("stage.name"):
+                # Stage names should differ between en and zh
+                i18n.init("en")
+                en_val = i18n.t(key)
+                i18n.init("zh")
+                assert val != en_val, f"zh value for {key} is same as en"
+
+    def test_stage_prompts_contain_tool_names(self):
+        """Stage prompt keys should reference the correct tools."""
+        i18n.init("en")
+        s1 = i18n.t("stage.1.metrics.prompt")
+        assert "list_kernels" in s1
+        assert "run_analysis" in s1
+
+        s2 = i18n.t("stage.2.source.prompt")
+        assert "get_performance_hotspots" in s2
+        assert "read_source_file" in s2
+
+        s3 = i18n.t("stage.3.recommend.prompt")
+        assert "HIGH" in s3
+
+    def test_stage_prompts_zh_contain_tool_names(self):
+        """Chinese stage prompts should still reference English tool names."""
+        i18n.init("zh")
+        s1 = i18n.t("stage.1.metrics.prompt")
+        assert "list_kernels" in s1
+        assert "run_analysis" in s1
+
+    def test_focus_strings_non_empty(self):
+        """All focus strings should have substantive content."""
+        i18n.init("en")
+        for key in ["prompt.focus.compute.text", "prompt.focus.memory.text",
+                     "prompt.focus.latency.text", "prompt.focus.general.text"]:
+            val = i18n.t(key)
+            assert len(val) > 50, f"Focus string {key} too short"
+
+    def test_context_previous_non_empty(self):
+        i18n.init("en")
+        val = i18n.t("stage.context.previous")
+        assert len(val) > 10

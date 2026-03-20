@@ -54,7 +54,19 @@ def build_system_prompt(
     return template.format(
         tool_catalog=tool_catalog,
         kernel_list=kernel_context or "(no report loaded yet)",
-    )
+    ) + _lang_instruction()
+
+
+def _lang_instruction() -> str:
+    """Append a language instruction based on current i18n setting."""
+    import tachyon.i18n as _i18n
+    lang = _i18n.current_lang()
+    if lang == "en":
+        return ""
+    instruction = _i18n.t("prompt.output_lang.text", fallback="")
+    if not instruction:
+        return ""
+    return f"\n\n## Language\n\n{instruction}"
 
 
 def build_kernel_context(kernels: list) -> str:

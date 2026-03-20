@@ -37,7 +37,7 @@ def register_source_view_tools(
     async def read_source_file(
         file: str,
         line: int | None = None,
-        context_lines: int = 20,
+        context_lines: int = 40,
         max_lines: int = 200,
     ) -> ToolResult:
         """Read source file content at a specific location.
@@ -45,7 +45,7 @@ def register_source_view_tools(
         Args:
             file: File path or basename for fuzzy matching.
             line: Center line number. If provided, returns lines around it.
-            context_lines: Number of lines before/after center (default 20).
+            context_lines: Number of lines before/after center (default 40).
             max_lines: Maximum lines to return (default 200, cap 500).
         """
         try:
@@ -150,7 +150,7 @@ def register_source_view_tools(
                 },
                 "context_lines": {
                     "type": "integer",
-                    "description": "Lines before/after center (default 20).",
+                    "description": "Lines before/after center (default 40).",
                 },
                 "max_lines": {
                     "type": "integer",

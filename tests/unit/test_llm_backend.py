@@ -943,10 +943,10 @@ class TestContextManager:
 
     def test_should_compact_before_threshold(self):
         assert not self.cm.should_compact(0)
-        assert not self.cm.should_compact(2)
+        assert not self.cm.should_compact(4)
 
     def test_should_compact_at_threshold(self):
-        assert self.cm.should_compact(3)
+        assert self.cm.should_compact(5)
 
     def test_should_compact_after_threshold(self):
         assert self.cm.should_compact(10)
