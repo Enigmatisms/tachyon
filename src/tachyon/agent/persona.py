@@ -13,6 +13,20 @@ from ..tools.registry import ToolRegistry
 
 _PERSONA_MD = Path(__file__).with_name("persona.md")
 
+_LEAN_SYSTEM = """\
+You are **Tachyon**, a CUDA/HPC performance analyst.
+
+## Tools
+{tool_catalog}
+
+**CRITICAL**: Call tools to gather evidence before making claims. \
+NEVER fabricate metrics, source code, or SASS instructions.
+
+## Output
+- Evidence-first: cite ``[metric=value]`` or ``[file:line -> SASS opcode]``.
+- Numbered recommendations with priority (HIGH/MEDIUM/LOW).
+- Be token-efficient."""
+
 AGENT_IDENTITY = {
     "name": "Tachyon",
     "role": "CUDA/HPC Performance Analysis Expert",
@@ -25,11 +39,24 @@ AGENT_IDENTITY = {
 }
 
 
+def _build_tool_catalog(registry: ToolRegistry) -> str:
+    """Build compact one-line-per-tool catalog from registry."""
+    lines = []
+    for tool in registry.all_definitions():
+        params = ", ".join(
+            f"{k}: {v.get('type', 'any')}"
+            for k, v in tool.parameters.get("properties", {}).items()
+        )
+        desc = tool.description.split(". ")[0]  # first sentence only
+        lines.append(f"  - `{tool.name}({params})` — {desc}")
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     registry: ToolRegistry,
     kernel_context: str | None = None,
 ) -> str:
-    """Build the complete system prompt for an agent session.
+    """Build the complete system prompt for an agent session (turn 0).
 
     Args:
         registry: ToolRegistry with all tools registered.
@@ -39,34 +66,51 @@ def build_system_prompt(
         Complete system prompt with template variables filled.
     """
     template = _PERSONA_MD.read_text(encoding="utf-8")
+    tool_catalog = _build_tool_catalog(registry)
 
-    # Build compact tool catalog
-    tool_lines = []
-    for tool in registry.all_definitions():
-        params = ", ".join(
-            f"{k}: {v.get('type', 'any')}"
-            for k, v in tool.parameters.get("properties", {}).items()
-        )
-        desc = tool.description.split(". ")[0]  # first sentence only
-        tool_lines.append(f"  - `{tool.name}({params})` — {desc}")
-    tool_catalog = "\n".join(tool_lines)
-
-    return template.format(
+    body = template.format(
         tool_catalog=tool_catalog,
         kernel_list=kernel_context or "(no report loaded yet)",
-    ) + _lang_instruction()
+    )
+
+    return _lang_prefix() + body
 
 
-def _lang_instruction() -> str:
-    """Append a language instruction based on current i18n setting."""
+def build_lean_system_prompt(
+    registry: ToolRegistry,
+    extra: str = "",
+) -> str:
+    """Build a minimal system prompt for turns after 0.
+
+    Keeps only identity + tool catalog + key rules.
+    Saves ~9000 chars (~2000 tokens) per subsequent turn.
+    """
+    tool_catalog = _build_tool_catalog(registry)
+    body = _LEAN_SYSTEM.format(tool_catalog=tool_catalog)
+    result = _lang_prefix() + body
+    if extra:
+        result += "\n\n" + extra
+    return result
+
+
+def _lang_prefix() -> str:
+    """Return a one-line language instruction to PREPEND to the system prompt.
+
+    Placed at the very top so the LLM sees it first (highest attention weight).
+    """
     import tachyon.i18n as _i18n
-    lang = _i18n.current_lang()
-    if lang == "en":
-        return ""
     instruction = _i18n.t("prompt.output_lang.text", fallback="")
     if not instruction:
         return ""
-    return f"\n\n## Language\n\n{instruction}"
+    return f"[Language] {instruction}\n\n"
+
+
+def _lang_instruction() -> str:
+    """Append a language instruction based on current i18n setting.
+
+    DEPRECATED: use _lang_prefix() instead. Kept for backward compat.
+    """
+    return _lang_prefix()
 
 
 def build_kernel_context(kernels: list) -> str:

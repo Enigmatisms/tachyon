@@ -1,5 +1,5 @@
 [prompt.output_lang]
-text = "Respond in English (简体中文). Use the same language as the user's query."
+text = "Always respond in the user's language. Chinese input → Chinese response. English input → English response. Technical terms (kernel, warp, stall, etc.) may stay in English."
 
 [report]
 executive_summary = "Executive Summary"
@@ -103,6 +103,18 @@ Output format: Numbered list sorted by priority, each containing [Problem] [Root
 
 [stage.context]
 previous = "Below are the analysis results from previous stages (complete content). Continue building on this:"
+
+[stage.deep_mode]
+note = """## Deep Analysis Mode
+
+Two-stage analysis:
+- **Stage 1**: Metric analysis — In this stage: only extract what kernels the user wants to profile (if any). Other user requests are all deferred to Stage 2. 
+   - Remember, Stage 2 is initiated in the next user input. 
+   - So do not reply other requests unless the user tell you to ignore stage settings. Focus only on the kernel demanded and the metrics analysis.
+- **Stage 2**: Initiate when the Q & A for stage 1 is complete. Source attribution + address all remaining user requests with actionable recommendations.
+   - In this stage, you should read and perfectly understand the source code and assembly (if available). Try pinpointing metrics problems with code and assembly. 
+
+Always respond in the user's language."""
 
 [prompt.focus.compute]
 text = """The dominant bottleneck is **COMPUTE**. Focus on:

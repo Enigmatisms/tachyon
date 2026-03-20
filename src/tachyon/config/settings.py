@@ -46,7 +46,7 @@ class ProfilingConfig:
 @dataclass
 class OutputConfig:
     """Output format and language configuration."""
-    lang: str = "en"
+    lang: str = ""  # empty = auto-detect from locale; "en" or "zh" to force
     format: str = "terminal"
 
 

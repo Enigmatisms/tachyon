@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tachyon.agent.context import (
-    COMPACT_AFTER_TURN,
     ContextManager,
 )
 from tachyon.agent.loop import (
@@ -19,6 +18,7 @@ from tachyon.agent.loop import (
     AgentEvent,
     AgentUsage,
     _collect_stream,
+    _prepend_lang_hint,
     _update_usage,
     _usage_dict,
     run_agent_loop,
@@ -26,6 +26,7 @@ from tachyon.agent.loop import (
 from tachyon.agent.persona import (
     AGENT_IDENTITY,
     build_kernel_context,
+    build_lean_system_prompt,
     build_system_prompt,
 )
 from tachyon.errors.handler import ErrorCode, ToolResult
@@ -155,25 +156,26 @@ class TestContextManager:
         ctx = ContextManager()
         assert ctx.estimate_tokens([]) == 0
 
-    def test_compact_tool_results_old_shortened(self):
-        """Old tool results beyond keep_last_n with long content get compacted."""
+    def test_compact_by_value_compresses_old_tool_results(self):
+        """Old tool results beyond keep_last_n with long content get compressed."""
         ctx = ContextManager()
         long_content = "First line of output\n" + "x" * 500
         messages = [
             _msg(Role.SYSTEM, "sys"),
-            _assistant_with_tools([ToolCall(id="tc1", name="t1", arguments={})]),
+            _assistant_with_tools([ToolCall(id="tc1", name="tool_alpha", arguments={})]),
             _tool_msg(long_content, tool_call_id="tc1", name="tool_alpha"),
-            _assistant_with_tools([ToolCall(id="tc2", name="t2", arguments={})]),
+            _assistant_with_tools([ToolCall(id="tc2", name="tool_beta", arguments={})]),
             _tool_msg("recent result", tool_call_id="tc2", name="tool_beta"),
         ]
-        ctx.compact_tool_results(messages, keep_last_n=1)
+        from tachyon.agent.context import _compress_by_value, ToolValue
+        _compress_by_value(messages, max_value=ToolValue.OTHER, keep_last_n=1)
         # First tool msg (index 2) should be compacted
-        assert messages[2].content.startswith("[tool_alpha:")
-        assert messages[2].content.endswith("...]")
+        assert "(compressed)" in messages[2].content
+        assert len(messages[2].content) < len(long_content)
         # Last tool msg (index 4) should remain unchanged
         assert messages[4].content == "recent result"
 
-    def test_compact_tool_results_fewer_than_keep_last_n(self):
+    def test_compact_by_value_fewer_than_keep_last_n(self):
         """When there are fewer tool results than keep_last_n, nothing changes."""
         ctx = ContextManager()
         messages = [
@@ -181,10 +183,11 @@ class TestContextManager:
             _tool_msg("only one tool result", tool_call_id="tc1", name="t1"),
         ]
         original_content = messages[1].content
-        ctx.compact_tool_results(messages, keep_last_n=2)
+        from tachyon.agent.context import _compress_by_value, ToolValue
+        _compress_by_value(messages, max_value=ToolValue.OTHER, keep_last_n=2)
         assert messages[1].content == original_content
 
-    def test_compact_tool_results_short_content_preserved(self):
+    def test_compact_by_value_short_content_preserved(self):
         """Tool results shorter than threshold are not compacted."""
         ctx = ContextManager()
         short = "ok"
@@ -193,87 +196,41 @@ class TestContextManager:
             _tool_msg(short, tool_call_id="tc1", name="t1"),
             _tool_msg("second", tool_call_id="tc2", name="t2"),
         ]
-        ctx.compact_tool_results(messages, keep_last_n=1)
+        from tachyon.agent.context import _compress_by_value, ToolValue
+        _compress_by_value(messages, max_value=ToolValue.OTHER, keep_last_n=1)
         # First tool result is short — should not be compacted
         assert messages[1].content == short
 
-    def test_distill_collapses_tool_pairs(self):
-        """distill() should collapse assistant(tool_calls) + tool results into summary."""
+    def test_needs_compaction_no_token_data(self):
+        """needs_compaction returns 0 when no real token count is available."""
         ctx = ContextManager()
-        tc = ToolCall(id="tc1", name="get_metrics", arguments={"id": 1})
-        messages = [
-            _msg(Role.SYSTEM, "sys"),
-            _msg(Role.USER, "analyze kernel 0"),
-            _assistant_with_tools([tc], content="Let me check"),
-            _tool_msg('{"result": "ok"}', tool_call_id="tc1", name="get_metrics"),
-            _msg(Role.ASSISTANT, content="Here is the result"),
-        ]
-        result = ctx.distill(messages)
-        assert len(result) == 4  # system, user, summary, final assistant
-        assert result[0].role == Role.SYSTEM
-        assert result[1].role == Role.USER
-        assert "[Agent called: get_metrics]" in result[2].content
-        assert result[3].content == "Here is the result"
+        assert ctx.needs_compaction() == 0
 
-    def test_distill_preserves_system_and_user(self):
-        """distill() must not drop system or user messages."""
-        ctx = ContextManager()
-        messages = [
-            _msg(Role.SYSTEM, "system prompt"),
-            _msg(Role.USER, "user question"),
-            _msg(Role.ASSISTANT, "plain answer"),
-        ]
-        result = ctx.distill(messages)
-        assert len(result) == 3
-        assert result[0].content == "system prompt"
-        assert result[1].content == "user question"
-        assert result[2].content == "plain answer"
+    def test_needs_compaction_tiers(self):
+        """needs_compaction returns correct tier based on token percentage."""
+        ctx = ContextManager(budget=100)
+        ctx.update_token_count(69)
+        assert ctx.needs_compaction() == 0
+        ctx.update_token_count(70)
+        assert ctx.needs_compaction() == 1
+        ctx.update_token_count(80)
+        assert ctx.needs_compaction() == 2
+        ctx.update_token_count(95)
+        assert ctx.needs_compaction() == 3
+        ctx.update_token_count(100)
+        assert ctx.needs_compaction() == 4
 
-    def test_distill_multiple_tool_calls(self):
-        """distill() collapses multiple tools in a single assistant message."""
-        ctx = ContextManager()
-        tcs = [
-            ToolCall(id="tc1", name="tool_a", arguments={}),
-            ToolCall(id="tc2", name="tool_b", arguments={}),
-        ]
-        messages = [
-            _msg(Role.SYSTEM, "sys"),
-            _assistant_with_tools(tcs),
-            _tool_msg("result a", tool_call_id="tc1", name="tool_a"),
-            _tool_msg("result b", tool_call_id="tc2", name="tool_b"),
-        ]
-        result = ctx.distill(messages)
-        assert len(result) == 2  # system + collapsed summary
-        assert "tool_a" in result[1].content
-        assert "tool_b" in result[1].content
-
-    def test_should_compact_below_threshold(self):
-        ctx = ContextManager()
-        for turn in range(COMPACT_AFTER_TURN):
-            assert ctx.should_compact(turn) is False
-
-    def test_should_compact_at_threshold(self):
-        ctx = ContextManager()
-        assert ctx.should_compact(COMPACT_AFTER_TURN) is True
-        assert ctx.should_compact(COMPACT_AFTER_TURN + 5) is True
-
-    def test_is_near_budget_below(self):
+    def test_get_budget_pct_with_real_tokens(self):
+        """get_budget_pct uses real token count when available."""
         ctx = ContextManager(budget=1000)
-        msgs = [_msg(Role.USER, "x" * 100)]  # ~25 tokens, well below 850
-        assert ctx.is_near_budget(msgs) is False
+        ctx.update_token_count(750)
+        assert ctx.get_budget_pct([]) == 75.0
 
-    def test_is_near_budget_above(self):
-        ctx = ContextManager(budget=100)
-        # 85% of 100 = 85 tokens. 400 chars / 4 = 100 tokens > 85
-        msgs = [_msg(Role.USER, "x" * 400)]
-        assert ctx.is_near_budget(msgs) is True
-
-    def test_is_near_budget_exactly_at_boundary(self):
-        # budget=100, threshold=85. Need estimated > 85.
-        # Role.USER: len/4.  340/4=85, not > 85. 344/4=86 > 85.
-        ctx = ContextManager(budget=100)
-        msgs = [_msg(Role.USER, "x" * 344)]
-        assert ctx.is_near_budget(msgs) is True
+    def test_get_budget_pct_fallback(self):
+        """get_budget_pct falls back to heuristic when no real token count."""
+        ctx = ContextManager(budget=1000)
+        msgs = [_msg(Role.USER, "x" * 400)]  # 100 tokens
+        assert ctx.get_budget_pct(msgs) == 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -491,28 +448,86 @@ class TestAgentLoop:
 
     @pytest.mark.asyncio
     async def test_context_compression_triggered(self):
-        """When context is near budget, compression events should be yielded."""
+        """When token usage exceeds 70% of budget, compression events should be yielded."""
         backend = _mock_backend()
-        backend.chat_completion.return_value = CompletionResponse(
-            content="Answer",
-            tool_calls=[],
-            usage=Usage(prompt_tokens=10, completion_tokens=5),
+        # First call returns tool_call (so loop continues to turn 2).
+        # Turn 2 will see prompt_tokens=80 with budget=100 → 80% → triggers compression.
+        tc = ToolCall(id="tc_1", name="get_kernel_metrics", arguments={})
+        resp1 = CompletionResponse(
+            content=None,
+            tool_calls=[tc],
+            usage=Usage(prompt_tokens=80, completion_tokens=5),
+            finish_reason="tool_calls",
         )
+        resp2 = CompletionResponse(
+            content="Final answer",
+            tool_calls=[],
+            usage=Usage(prompt_tokens=80, completion_tokens=5),
+        )
+        backend.chat_completion.side_effect = [resp1, resp2]
         registry = _mock_registry_with_tool()
 
-        # Use a very small budget so is_near_budget triggers immediately
         events = await _collect_events(
             run_agent_loop(
-                backend, registry, "analyze " + "x" * 2000, "sys " * 500,
+                backend, registry, "analyze", "sys",
                 context_budget=100,
             )
         )
 
-        types = [e.type for e in events]
-        assert "system" in types
         sys_events = [e for e in events if e.type == "system"]
-        compression_evts = [e for e in sys_events if "Compressing" in (e.content or "")]
+        compression_evts = [e for e in sys_events
+                           if "compression" in (e.content or "").lower()]
         assert len(compression_evts) >= 1
+
+    @pytest.mark.asyncio
+    async def test_lean_system_prompt_applied_after_turn_0(self):
+        """After turn 0, system message should be swapped with lean version.
+
+        The trim event is only emitted when debug recording is active.
+        """
+        tc = ToolCall(id="tc_1", name="list_kernels", arguments={})
+        full_prompt = "You are Tachyon. " + "x" * 5000
+        lean_prompt = "Lean prompt."
+
+        async def _run_with(debug: bool) -> list:
+            backend = _mock_backend()
+            resp1 = CompletionResponse(
+                content="Let me check.",
+                tool_calls=[tc],
+                usage=Usage(prompt_tokens=100, completion_tokens=5),
+                finish_reason="tool_calls",
+            )
+            resp2 = CompletionResponse(
+                content="Done.",
+                tool_calls=[],
+                usage=Usage(prompt_tokens=50, completion_tokens=5),
+            )
+            backend.chat_completion.side_effect = [resp1, resp2]
+            registry = _mock_registry_with_tool()
+            return await _collect_events(
+                run_agent_loop(
+                    backend, registry, "go", full_prompt,
+                    lean_system_prompt=lean_prompt,
+                )
+            )
+
+        # Without debug: no trim event
+        events = await _run_with(debug=False)
+        trim_events = [e for e in events
+                       if e.type == "system" and "trimmed" in (e.content or "")]
+        assert len(trim_events) == 0
+
+        # With debug: trim event emitted
+        import tachyon.utils.debug_record as _dr
+        _dr._level = _dr._L.PROMPT
+        try:
+            events = await _run_with(debug=True)
+            trim_events = [e for e in events
+                           if e.type == "system" and "trimmed" in (e.content or "")]
+            assert len(trim_events) == 1
+            assert "saved" in trim_events[0].content
+        finally:
+            _dr._level = _dr._L.NONE
 
     @pytest.mark.asyncio
     async def test_history_prepended(self):
@@ -600,9 +615,10 @@ class TestAgentLoop:
         )
 
         done_ev = next(e for e in events if e.type == "done")
-        assert done_ev.data["prompt_tokens"] == 300
+        assert done_ev.data["prompt_tokens"] == 200
         assert done_ev.data["completion_tokens"] == 130
-        assert done_ev.data["total_tokens"] == 430
+        assert done_ev.data["total_tokens"] == 430  # (100+50) + (200+80)
+        assert done_ev.data["peak_prompt_tokens"] == 200
         assert done_ev.data["tool_calls"] == 1
         assert done_ev.data["turns"] == 2
 
@@ -631,12 +647,16 @@ class TestAgentLoop:
 # ---------------------------------------------------------------------------
 
 class TestUpdateUsage:
-    def test_accumulates(self):
+    def test_prompt_tokens_is_latest(self):
+        """prompt_tokens stores the latest value; total_cost accumulates real API cost."""
         usage = AgentUsage()
         _update_usage(usage, {"prompt_tokens": 10, "completion_tokens": 5})
         _update_usage(usage, {"prompt_tokens": 20, "completion_tokens": 15})
-        assert usage.prompt_tokens == 30
-        assert usage.completion_tokens == 20
+        assert usage.prompt_tokens == 20  # latest, not 30
+        assert usage.completion_tokens == 20  # still cumulative
+        assert usage.total_cost == 50  # (10+5) + (20+15)
+        assert usage.last_prompt_tokens == 20
+        assert usage.peak_prompt_tokens == 20
 
     def test_missing_keys(self):
         usage = AgentUsage()
@@ -647,13 +667,53 @@ class TestUpdateUsage:
 
 class TestUsageDict:
     def test_conversion(self):
-        usage = AgentUsage(prompt_tokens=100, completion_tokens=50, turns=3, tool_calls=2)
+        usage = AgentUsage(prompt_tokens=100, completion_tokens=50,
+                           total_cost=150, turns=3, tool_calls=2)
         d = _usage_dict(usage)
         assert d["prompt_tokens"] == 100
         assert d["completion_tokens"] == 50
         assert d["total_tokens"] == 150
         assert d["turns"] == 3
         assert d["tool_calls"] == 2
+
+
+class TestPrependLangHint:
+    def test_chinese_input_gets_hint(self):
+        result = _prepend_lang_hint("分析这个kernel的性能")
+        assert result.startswith("（用中文回答）")
+        assert "分析这个kernel的性能" in result
+
+    def test_english_input_unchanged(self):
+        text = "Analyze this kernel's performance"
+        assert _prepend_lang_hint(text) == text
+
+    def test_mixed_cjk_and_ascii(self):
+        """Even mixed content with CJK triggers the hint."""
+        result = _prepend_lang_hint("帮我分析 matmul kernel")
+        assert result.startswith("（用中文回答）")
+
+    def test_already_prefixed_no_double(self):
+        text = "（用中文回答）\n\n分析一下"
+        assert _prepend_lang_hint(text) == text
+
+    def test_empty_input(self):
+        assert _prepend_lang_hint("") == ""
+
+    def test_japanese_input_triggers(self):
+        """CJK range covers Japanese kanji too."""
+        result = _prepend_lang_hint("このカーネルを分析してください")
+        assert result.startswith("（用中文回答）")
+
+    def test_explicit_lang_on_english_text(self):
+        """explicit_lang=True adds hint even for pure English text."""
+        result = _prepend_lang_hint("Analyze kernel performance", explicit_lang=True)
+        assert result.startswith("（用中文回答）")
+        assert "Analyze kernel performance" in result
+
+    def test_explicit_lang_no_double_prepend(self):
+        """explicit_lang=True respects existing prefix."""
+        text = "（用中文回答）\n\nAnalyze kernel"
+        assert _prepend_lang_hint(text, explicit_lang=True) == text
 
 
 # ---------------------------------------------------------------------------
@@ -761,3 +821,26 @@ class TestPersona:
         kernels = [FakeKernel()]
         result = build_kernel_context(kernels)
         assert "fallback_name" in result
+
+    def test_build_lean_system_prompt_has_tools(self):
+        """Lean prompt includes tool catalog and identity."""
+        registry = _make_registry(_dummy_tool_def("list_kernels", "List all kernels."))
+        prompt = build_lean_system_prompt(registry)
+        assert "Tachyon" in prompt
+        assert "list_kernels" in prompt
+        assert "NEVER fabricate" in prompt
+
+    def test_lean_prompt_is_shorter_than_full(self):
+        """Lean prompt should be significantly shorter than full prompt."""
+        tool = _dummy_tool_def("get_metrics", "Get kernel metrics.")
+        registry = _make_registry(tool)
+        full = build_system_prompt(registry)
+        lean = build_lean_system_prompt(registry)
+        assert len(lean) < len(full) * 0.5
+
+    def test_lean_prompt_with_extra(self):
+        """Extra content (e.g. deep mode note) is appended."""
+        registry = _make_registry(_dummy_tool_def())
+        prompt = build_lean_system_prompt(registry, extra="## Deep Mode\nTwo stages.")
+        assert "Deep Mode" in prompt
+        assert "Two stages." in prompt

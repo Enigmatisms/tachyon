@@ -16,7 +16,7 @@ class TestDefaultConfig:
         assert cfg.llm.api_key is None
         assert cfg.llm.api_key_env == "OPENAI_API_KEY"
         assert cfg.profiling.strategy == "conservative"
-        assert cfg.output.lang == "en"
+        assert cfg.output.lang == ""
         assert cfg.output.format == "terminal"
         assert cfg.tools.ncu_path is None
 

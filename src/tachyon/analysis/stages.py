@@ -209,6 +209,9 @@ async def run_staged_analysis(
 
         try:
             from tachyon.agent.context import DEEP_TOKEN_BUDGET
+            from tachyon.agent.persona import build_lean_system_prompt
+
+            lean = build_lean_system_prompt(registry) if registry else None
 
             async for event in run_agent_loop(
                 backend=backend,
@@ -220,6 +223,7 @@ async def run_staged_analysis(
                 timeout=timeout_per_stage,
                 move_timeout=move_timeout,
                 context_budget=DEEP_TOKEN_BUDGET,
+                lean_system_prompt=lean,
             ):
                 if event.type == "text" and event.content:
                     text_parts.append(event.content)

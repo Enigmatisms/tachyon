@@ -320,8 +320,10 @@ class TestM3Pipeline:
             events.append(event)
 
         done = next(e for e in events if e.type == "done")
-        assert done.data["prompt_tokens"] == 300  # 100 + 200
-        assert done.data["completion_tokens"] == 50  # 20 + 30
+        assert done.data["prompt_tokens"] == 200  # latest value, not accumulated
+        assert done.data["completion_tokens"] == 50  # 20 + 30 (cumulative)
+        assert done.data["total_tokens"] == 350  # (100+20) + (200+30)
+        assert done.data["peak_prompt_tokens"] == 200
         assert done.data["turns"] == 2
         assert done.data["tool_calls"] == 1
 

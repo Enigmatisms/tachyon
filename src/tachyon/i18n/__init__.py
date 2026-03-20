@@ -37,17 +37,17 @@ def init(lang: str | None = None) -> None:
 
 def _resolve_lang(explicit: str | None) -> str:
     """Resolve language with priority: explicit > env > locale > 'en'."""
-    if explicit:
+    if explicit:  # non-empty string — user/config override
         return explicit
     if env_lang := os.environ.get("TACHYON_LANG"):
         return env_lang
-    # locale.getlocale() returns (language_code, encoding) or (None, None).
-    # NOTE: We intentionally avoid locale.getdefaultlocale() which is deprecated
-    # since Python 3.11.
+    # Check LANG (e.g. LANG=zh_CN.UTF-8) — broader than locale.getlocale()
+    lang_env = os.environ.get("LANG", "")
+    if lang_env.startswith("zh"):
+        return "zh"
     try:
         sys_locale = locale.getlocale()[0] or ""
     except ValueError:
-        # getlocale() can raise ValueError on some platforms with unusual locale
         sys_locale = ""
     if sys_locale.startswith("zh"):
         return "zh"

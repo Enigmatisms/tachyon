@@ -14,6 +14,7 @@ tests run without any provider packages installed.
 from __future__ import annotations
 
 import json
+import asyncio
 import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -798,12 +799,14 @@ class TestLiteLLMBackend:
 
 
 class TestContextManager:
-    """Test the ContextManager from tachyon.agent.context."""
+    """Test the ContextManager from tachyon.agent.context (v2 tiered API)."""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
         from tachyon.agent.context import ContextManager
         self.cm = ContextManager(budget=1000)
+
+    # --- estimate_tokens (unchanged) ---
 
     def test_estimate_tokens_empty(self):
         assert self.cm.estimate_tokens([]) == 0
@@ -825,7 +828,6 @@ class TestContextManager:
         tc = ToolCall(id="tc_1", name="bash", arguments={"cmd": "echo hello world"})
         msg = Message(role=Role.ASSISTANT, content="ok", tool_calls=[tc])
         tokens = self.cm.estimate_tokens([msg])
-        # "ok" is 2 chars // 4 = 0, plus json.dumps(arguments) length // 4
         args_json = json.dumps(tc.arguments)
         expected = len("ok") // 4 + len(args_json) // 4
         assert tokens == expected
@@ -838,141 +840,340 @@ class TestContextManager:
         ]
         assert self.cm.estimate_tokens(messages) == 40
 
-    def test_compact_tool_results_shortens_old_results(self):
-        """Old tool results (beyond keep_last_n) with long content are compacted."""
+    # --- needs_compaction (tier-based) ---
+
+    def test_needs_compaction_no_token_data(self):
+        """Returns 0 when no real token count is available."""
+        assert self.cm.needs_compaction() == 0
+
+    def test_needs_compaction_tier0(self):
+        """Below 70% returns tier 0."""
+        self.cm.update_token_count(699)  # 699/1000 = 69.9%
+        assert self.cm.needs_compaction() == 0
+
+    def test_needs_compaction_tier1(self):
+        """>= 70% returns tier 1."""
+        self.cm.update_token_count(700)
+        assert self.cm.needs_compaction() == 1
+
+    def test_needs_compaction_tier2(self):
+        """>= 80% returns tier 2."""
+        self.cm.update_token_count(800)
+        assert self.cm.needs_compaction() == 2
+
+    def test_needs_compaction_tier3(self):
+        """>= 95% returns tier 3."""
+        self.cm.update_token_count(950)
+        assert self.cm.needs_compaction() == 3
+
+    def test_needs_compaction_tier4(self):
+        """>= 100% returns tier 4."""
+        self.cm.update_token_count(1000)
+        assert self.cm.needs_compaction() == 4
+
+    # --- get_budget_pct ---
+
+    def test_get_budget_pct_with_real_tokens(self):
+        """Uses real token count when available."""
+        self.cm.update_token_count(500)
+        assert self.cm.get_budget_pct([]) == 50.0
+
+    def test_get_budget_pct_fallback_estimate(self):
+        """Falls back to heuristic when no real token count."""
+        messages = [Message(role=Role.USER, content="x" * 400)]  # 100 tokens
+        pct = self.cm.get_budget_pct(messages)
+        assert pct == 10.0  # 100/1000 * 100
+
+    # --- compact (tiered compression) ---
+
+    def test_compact_tier1_only_compresses_other(self):
+        """Tier 1 compresses OTHER-value tools, preserves SOURCE/ANALYSIS/META."""
         messages = [
-            Message(role=Role.USER, content="read files"),
-            Message(
-                role=Role.TOOL,
-                content="A" * 300,  # old, long -> should be compacted
-                tool_call_id="tc_old",
-                name="read_file",
-            ),
-            Message(
-                role=Role.TOOL,
-                content="B" * 300,  # recent -> should be kept
-                tool_call_id="tc_new",
-                name="grep",
-            ),
+            Message(role=Role.USER, content="analyze"),
+            # 5 OTHER tool results — only last 3 kept, oldest 2 compressed
+            Message(role=Role.TOOL, content="W" * 300,
+                    tool_call_id="tc_w", name="list_source_files"),
+            Message(role=Role.TOOL, content="X" * 300,
+                    tool_call_id="tc_x", name="list_source_files"),
+            # SOURCE tool result — filtered out (value 4 > max_value 1)
+            Message(role=Role.TOOL, content="Y" * 300,
+                    tool_call_id="tc_y", name="read_source_file"),
+            Message(role=Role.TOOL, content="Z1" * 150,
+                    tool_call_id="tc_z1", name="list_source_files"),
+            Message(role=Role.TOOL, content="Z2" * 150,
+                    tool_call_id="tc_z2", name="list_source_files"),
+            Message(role=Role.TOOL, content="Z3" * 150,
+                    tool_call_id="tc_z3", name="list_source_files"),
         ]
-        self.cm.compact_tool_results(messages, keep_last_n=1)
+        self.cm.update_token_count(700)
+        asyncio.run(self.cm.compact(messages))
 
-        # Old result should be compacted
-        assert messages[1].content.startswith("[read_file:")
-        assert "..." in messages[1].content
-        assert len(messages[1].content) < 300
+        # Oldest 2 OTHER should be compressed (5 OTHER total, keep last 3)
+        assert "(compressed)" in messages[1].content
+        assert "(compressed)" in messages[2].content
+        # SOURCE should be untouched
+        assert messages[3].content == "Y" * 300
 
-        # Recent result should remain intact
-        assert messages[2].content == "B" * 300
-
-    def test_compact_tool_results_keeps_recent_intact(self):
-        """When keep_last_n covers all tool results, nothing changes."""
-        original_content = "Short result"
+    def test_compact_tier2_compresses_meta_preserves_source(self):
+        """Tier 2 compresses META-value tools, preserves SOURCE/ANALYSIS."""
         messages = [
-            Message(role=Role.TOOL, content=original_content, tool_call_id="tc_1", name="t"),
+            Message(role=Role.USER, content="analyze"),
+            # 5 META tool results — only last 3 kept among those <= META
+            Message(role=Role.TOOL, content="M1" * 150,
+                    tool_call_id="tc_m1", name="get_kernel_metrics"),
+            Message(role=Role.TOOL, content="M2" * 150,
+                    tool_call_id="tc_m2", name="get_kernel_metrics"),
+            # SOURCE tool result — filtered out (value 4 > max_value 2)
+            Message(role=Role.TOOL, content="S" * 300,
+                    tool_call_id="tc_s", name="read_source_file"),
+            Message(role=Role.TOOL, content="M3" * 150,
+                    tool_call_id="tc_m3", name="get_kernel_metrics"),
+            Message(role=Role.TOOL, content="M4" * 150,
+                    tool_call_id="tc_m4", name="get_kernel_metrics"),
+            Message(role=Role.TOOL, content="M5" * 150,
+                    tool_call_id="tc_m5", name="get_kernel_metrics"),
         ]
-        self.cm.compact_tool_results(messages, keep_last_n=1)
-        assert messages[0].content == original_content
+        self.cm.update_token_count(800)
+        asyncio.run(self.cm.compact(messages))
 
-    def test_compact_tool_results_skips_short_content(self):
-        """Old results with content shorter than threshold are left alone."""
-        messages = [
-            Message(role=Role.TOOL, content="short", tool_call_id="tc_1", name="t1"),
-            Message(role=Role.TOOL, content="recent", tool_call_id="tc_2", name="t2"),
-        ]
-        self.cm.compact_tool_results(messages, keep_last_n=1)
-        assert messages[0].content == "short"  # under 200 chars, not compacted
+        # At least the first 2 META should be compressed (5 META total, keep last 3)
+        assert "(compressed)" in messages[1].content
+        assert "(compressed)" in messages[2].content
+        # SOURCE should be untouched
+        assert messages[3].content == "S" * 300
 
-    def test_compact_tool_results_preserves_metadata(self):
+    def test_compact_tier_is_irreversible(self):
+        """Each tier is applied at most once."""
+        self.cm.update_token_count(700)
+        asyncio.run(self.cm.compact([Message(role=Role.USER, content="x")]))
+
+        assert self.cm._max_tier_applied == 1
+        assert self.cm.compaction_count == 1
+
+    def test_compact_no_action_when_below_threshold(self):
+        """No compression when tokens are below 70%."""
+        self.cm.update_token_count(500)
+        actions = asyncio.run(
+            self.cm.compact([Message(role=Role.USER, content="x")])
+        )
+        assert actions == []
+
+    # --- _smart_truncate ---
+
+    def test_smart_truncate_json_dict(self):
+        """JSON dict content extracts key-value pairs."""
+        from tachyon.agent.context import _smart_truncate
+        content = json.dumps({"key1": "value1", "key2": "value2"})
+        result = _smart_truncate(content, "test_tool", 200)
+        assert "(compressed)" in result
+        assert "test_tool" in result
+        assert "key1" in result
+
+    def test_smart_truncate_plain_text(self):
+        """Plain text keeps first paragraph."""
+        from tachyon.agent.context import _smart_truncate
+        content = "First paragraph here.\n\nSecond paragraph with more details."
+        result = _smart_truncate(content, "text_tool", 200)
+        assert "First paragraph here" in result
+        assert "Second paragraph" not in result
+
+    def test_smart_truncate_invalid_json(self):
+        """Invalid JSON falls through to plain-text truncation."""
+        from tachyon.agent.context import _smart_truncate
+        content = "{not valid json} but some text"
+        result = _smart_truncate(content, "broken_tool", 200)
+        assert "(compressed)" in result
+        assert "broken_tool" in result
+
+    # --- compact metadata preservation ---
+
+    def test_compact_preserves_tool_metadata(self):
         """Compacted messages retain tool_call_id and name."""
         messages = [
-            Message(role=Role.TOOL, content="X" * 300, tool_call_id="tc_old", name="read_file"),
-            Message(role=Role.TOOL, content="recent", tool_call_id="tc_new", name="grep"),
+            Message(role=Role.USER, content="x"),
+            Message(role=Role.TOOL, content="W" * 300,
+                    tool_call_id="tc_old1", name="list_source_files"),
+            Message(role=Role.TOOL, content="X" * 300,
+                    tool_call_id="tc_old2", name="list_source_files"),
+            Message(role=Role.TOOL, content="Y" * 300,
+                    tool_call_id="tc_old3", name="list_source_files"),
+            Message(role=Role.TOOL, content="recent",
+                    tool_call_id="tc_new", name="list_source_files"),
         ]
-        self.cm.compact_tool_results(messages, keep_last_n=1)
-        assert messages[0].tool_call_id == "tc_old"
-        assert messages[0].name == "read_file"
+        self.cm.update_token_count(700)
+        asyncio.run(self.cm.compact(messages))
 
-    def test_distill_collapses_tool_pairs(self):
-        """Tool-call/result pairs are collapsed into a single summary."""
-        tc = ToolCall(id="tc_1", name="read_file", arguments={"path": "/a"})
+        assert messages[1].tool_call_id == "tc_old1"
+        assert messages[1].name == "list_source_files"
+
+    # --- LLM summarization (Tier 3) ---
+
+    def test_compact_tier3_llm_summarize(self):
+        """Tier 3 with a mock backend triggers LLM summarization."""
+        from tachyon.llm.backend import CompletionResponse
+
+        mock_backend = AsyncMock()
+        mock_backend.chat_completion = AsyncMock(return_value=CompletionResponse(
+            content="## Summary\n- Finding 1\n- Finding 2",
+        ))
+
+        messages = [
+            Message(role=Role.SYSTEM, content="sys prompt"),
+            Message(role=Role.USER, content="analyze kernel"),
+            Message(role=Role.ASSISTANT, content=None,
+                    tool_calls=[ToolCall(id="tc1", name="get_stall_analysis_for_line",
+                                        arguments={"kernel": "k1", "line": 10})]),
+            Message(role=Role.TOOL, content='{"stall_type": "long_scoreboard", "pct": 45}',
+                    tool_call_id="tc1", name="get_stall_analysis_for_line"),
+            Message(role=Role.ASSISTANT, content="done"),
+        ]
+        self.cm.update_token_count(950)
+        asyncio.run(
+            self.cm.compact(messages, backend=mock_backend)
+        )
+
+        mock_backend.chat_completion.assert_called_once()
+        assert any("Summary" in (m.content or "") for m in messages)
+        assert self.cm._max_tier_applied == 3
+
+    def test_compact_tier3_fallback_on_llm_failure(self):
+        """Tier 3 falls back to rule compression when LLM fails."""
+        mock_backend = AsyncMock()
+        mock_backend.chat_completion = AsyncMock(side_effect=RuntimeError("LLM down"))
+
+        messages = [
+            Message(role=Role.USER, content="x"),
+            Message(role=Role.TOOL, content="A" * 300,
+                    tool_call_id="tc1", name="get_stall_analysis_for_line"),
+        ]
+        self.cm.update_token_count(950)
+        actions = asyncio.run(
+            self.cm.compact(messages, backend=mock_backend)
+        )
+
+        assert any(t == 3 for t, _ in actions)
+        assert self.cm._max_tier_applied == 3
+
+    # --- _tool_value helper ---
+
+    def test_tool_value_mapping(self):
+        from tachyon.agent.context import ToolValue, _tool_value
+        assert _tool_value("read_source_file") == ToolValue.SOURCE
+        assert _tool_value("get_stall_analysis_for_line") == ToolValue.ANALYSIS
+        assert _tool_value("get_kernel_metrics") == ToolValue.META
+        assert _tool_value("list_source_files") == ToolValue.OTHER
+        assert _tool_value("unknown_tool") == ToolValue.OTHER
+        assert _tool_value(None) == ToolValue.OTHER
+
+    # --- update_token_count ---
+
+    def test_update_token_count(self):
+        assert self.cm.current_tokens == 0
+        self.cm.update_token_count(500)
+        assert self.cm.current_tokens == 500
+        self.cm.update_token_count(600)
+        assert self.cm.current_tokens == 600  # updated, not accumulated
+
+    def test_llm_summarize_timeout_falls_back(self):
+        """LLM summarization timeout should be caught and fall back to rule compression."""
+        mock_backend = AsyncMock()
+        mock_backend.chat_completion = AsyncMock(
+            side_effect=asyncio.TimeoutError("LLM timeout")
+        )
+
+        messages = [
+            Message(role=Role.USER, content="x"),
+            Message(role=Role.TOOL, content="A" * 300,
+                    tool_call_id="tc1", name="get_stall_analysis_for_line"),
+        ]
+        self.cm.update_token_count(950)
+        actions = asyncio.run(self.cm.compact(messages, backend=mock_backend))
+
+        # Should have fallen back gracefully
+        assert any(t == 3 for t, _ in actions)
+        assert self.cm._max_tier_applied == 3
+
+    def test_find_turn_boundary_preserves_structure(self):
+        """_find_turn_boundary should not cut in the middle of a turn."""
+        from tachyon.agent.context import _find_turn_boundary
         messages = [
             Message(role=Role.SYSTEM, content="sys"),
-            Message(role=Role.USER, content="read my file"),
-            Message(role=Role.ASSISTANT, content=None, tool_calls=[tc]),
-            Message(role=Role.TOOL, content="file data", tool_call_id="tc_1", name="read_file"),
-            Message(role=Role.ASSISTANT, content="Done."),
+            Message(role=Role.USER, content="q"),
+            Message(role=Role.ASSISTANT, content=None, tool_calls=[
+                ToolCall(id="tc1", name="t1", arguments={}),
+            ]),
+            Message(role=Role.TOOL, content="r1", tool_call_id="tc1", name="t1"),
+            Message(role=Role.ASSISTANT, content=None, tool_calls=[
+                ToolCall(id="tc2", name="t2", arguments={}),
+            ]),
+            Message(role=Role.TOOL, content="r2", tool_call_id="tc2", name="t2"),
+            Message(role=Role.ASSISTANT, content="final"),
         ]
-        result = self.cm.distill(messages)
+        # keep_turns=1 → should point to the last assistant (index 6) — a text-only turn
+        boundary = _find_turn_boundary(messages, keep_turns=1)
+        assert boundary == 6
 
-        # System, user, collapsed summary, final assistant = 4 messages
-        assert len(result) == 4
-        assert result[0].role is Role.SYSTEM
-        assert result[1].role is Role.USER
-        assert result[2].role is Role.ASSISTANT
-        assert "read_file" in result[2].content
-        assert result[2].content.startswith("[Agent called:")
-        assert result[3].content == "Done."
+        # keep_turns=2 → should include the last tool call pair
+        boundary = _find_turn_boundary(messages, keep_turns=2)
+        assert boundary == 4  # start of ASSISTANT(tc2) + TOOL(r2)
 
-    def test_distill_preserves_plain_messages(self):
-        """Non-tool messages pass through distillation unchanged."""
-        messages = [
-            Message(role=Role.USER, content="Hello"),
-            Message(role=Role.ASSISTANT, content="Hi there!"),
-        ]
-        result = self.cm.distill(messages)
-        assert len(result) == 2
-        assert result[0].content == "Hello"
-        assert result[1].content == "Hi there!"
+    # --- legacy API removal: should_compact / is_near_budget / compact_tool_results / distill ---
+    # These methods no longer exist. The tests above cover the replacement functionality.
 
-    def test_distill_multiple_tool_calls(self):
-        """Multiple tool_calls in one assistant message are all listed in summary."""
-        tcs = [
-            ToolCall(id="tc_1", name="read_file", arguments={}),
-            ToolCall(id="tc_2", name="grep", arguments={}),
-        ]
-        messages = [
-            Message(role=Role.ASSISTANT, tool_calls=tcs),
-            Message(role=Role.TOOL, content="r1", tool_call_id="tc_1", name="read_file"),
-            Message(role=Role.TOOL, content="r2", tool_call_id="tc_2", name="grep"),
-        ]
-        result = self.cm.distill(messages)
-        assert len(result) == 1
-        assert "read_file" in result[0].content
-        assert "grep" in result[0].content
 
-    def test_should_compact_before_threshold(self):
-        assert not self.cm.should_compact(0)
-        assert not self.cm.should_compact(4)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  7b. _update_usage fix — prompt_tokens is absolute, not cumulative
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def test_should_compact_at_threshold(self):
-        assert self.cm.should_compact(5)
 
-    def test_should_compact_after_threshold(self):
-        assert self.cm.should_compact(10)
+class TestUpdateUsageFix:
+    """Verify the _update_usage bug fix: prompt_tokens = latest, not accumulated."""
 
-    def test_is_near_budget_below(self):
-        """Messages well below budget should return False."""
-        messages = [Message(role=Role.USER, content="x" * 40)]  # ~10 tokens
-        assert not self.cm.is_near_budget(messages)
+    def test_prompt_tokens_is_latest_not_sum(self):
+        """prompt_tokens should be the latest API value, not += accumulated."""
+        from tachyon.agent.loop import AgentUsage, _update_usage
+        usage = AgentUsage()
 
-    def test_is_near_budget_above(self):
-        """Messages exceeding 85% of budget should return True."""
-        # budget=1000, 85% = 850 tokens needed
-        # weight=4 for user messages, so need 850*4=3400 chars
-        messages = [Message(role=Role.USER, content="x" * 3500)]
-        assert self.cm.is_near_budget(messages)
+        _update_usage(usage, {"prompt_tokens": 5000, "completion_tokens": 100})
+        assert usage.prompt_tokens == 5000
+        assert usage.last_prompt_tokens == 5000
+        assert usage.total_cost == 5100  # 5000 + 100
 
-    def test_is_near_budget_at_boundary(self):
-        """Test near the exact 85% boundary."""
-        # budget=1000, threshold=850 tokens
-        # 3400 chars / 4 = 850 tokens exactly -> should return False (not >)
-        messages = [Message(role=Role.USER, content="x" * 3400)]
-        assert not self.cm.is_near_budget(messages)
+        _update_usage(usage, {"prompt_tokens": 7000, "completion_tokens": 150})
+        assert usage.prompt_tokens == 7000  # NOT 12000
+        assert usage.last_prompt_tokens == 7000
+        assert usage.total_cost == 12250  # 5100 + 7000 + 150
 
-        # 3404 chars / 4 = 851 tokens -> should return True
-        messages_over = [Message(role=Role.USER, content="x" * 3404)]
-        assert self.cm.is_near_budget(messages_over)
+    def test_completion_tokens_is_cumulative(self):
+        """completion_tokens should accumulate across turns."""
+        from tachyon.agent.loop import AgentUsage, _update_usage
+        usage = AgentUsage()
+
+        _update_usage(usage, {"prompt_tokens": 5000, "completion_tokens": 100})
+        _update_usage(usage, {"prompt_tokens": 7000, "completion_tokens": 150})
+        assert usage.completion_tokens == 250
+
+    def test_peak_prompt_tokens_tracks_maximum(self):
+        """peak_prompt_tokens should track the highest prompt_tokens seen."""
+        from tachyon.agent.loop import AgentUsage, _update_usage
+        usage = AgentUsage()
+
+        _update_usage(usage, {"prompt_tokens": 5000, "completion_tokens": 100})
+        _update_usage(usage, {"prompt_tokens": 7000, "completion_tokens": 150})
+        _update_usage(usage, {"prompt_tokens": 6000, "completion_tokens": 200})
+        assert usage.peak_prompt_tokens == 7000
+
+    def test_usage_dict_includes_new_fields(self):
+        """_usage_dict should include peak_prompt_tokens and compaction_count."""
+        from tachyon.agent.loop import AgentUsage, _usage_dict
+        usage = AgentUsage(prompt_tokens=7000, completion_tokens=250,
+                           turns=3, tool_calls=5,
+                           last_prompt_tokens=7000, peak_prompt_tokens=7000,
+                           compaction_count=1)
+        d = _usage_dict(usage)
+        assert d["peak_prompt_tokens"] == 7000
+        assert d["compaction_count"] == 1
+        assert d["prompt_tokens"] == 7000
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

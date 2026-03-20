@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -29,8 +30,24 @@ from ..llm.backend import (
 )
 from ..tools.registry import ToolRegistry
 from .context import ContextManager
+from ..utils.debug_record import record_prompt, record_tool, level as _debug_level
 
 _log = logging.getLogger(__name__)
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
+_CJK_LANG_HINT = "（用中文回答）\n\n"
+
+
+def _prepend_lang_hint(text: str, *, explicit_lang: bool = False) -> str:
+    """Prepend a Chinese-response hint when needed.
+
+    When *explicit_lang* is True the hint is added regardless of text content
+    (caller has determined the user's language preference). Otherwise it is
+    added only when *text* contains CJK characters.
+    """
+    if (explicit_lang or _CJK_RE.search(text)) and not text.startswith("（"):
+        return _CJK_LANG_HINT + text
+    return text
 
 MAX_TURNS = 10
 TYPICAL_TURNS = 5
@@ -50,10 +67,14 @@ class AgentEvent:
 @dataclass
 class AgentUsage:
     """Accumulated token usage across all turns."""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    prompt_tokens: int = 0          # latest API-reported context size
+    completion_tokens: int = 0      # accumulated completion tokens (incremental)
+    total_cost: int = 0             # accumulated API cost: sum(prompt + completion) per turn
     turns: int = 0
     tool_calls: int = 0
+    last_prompt_tokens: int = 0     # most recent API prompt token count
+    peak_prompt_tokens: int = 0     # highest prompt_tokens seen
+    compaction_count: int = 0       # number of context compressions applied
 
 
 async def run_agent_loop(
@@ -67,6 +88,10 @@ async def run_agent_loop(
     timeout: int = 600,
     move_timeout: int = 120,
     max_retries: int = 1,
+    lean_system_prompt: str | None = None,
+    trim_user_after_turn0: str | None = None,
+    synthesis_prompt: str | None = None,
+    prefer_lang: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the multi-turn agent loop.
 
@@ -74,13 +99,21 @@ async def run_agent_loop(
         backend: LLMBackend instance.
         registry: ToolRegistry with all tools.
         user_message: User's question or request.
-        system_prompt: Assembled system prompt.
+        system_prompt: Assembled system prompt (full, for turn 0).
         history: Optional conversation history.
         stream: Whether to stream LLM output.
         context_budget: Token budget for context management.
         timeout: Total timeout in seconds (default 600 = 10 min).
         move_timeout: Per-move timeout for LLM call (default 120s).
         max_retries: Retry count for 429/timeout errors (default 1).
+        lean_system_prompt: Minimal system prompt for turns after 0.
+            Saves ~2000 tokens per subsequent turn.
+        trim_user_after_turn0: If set, replace the first USER message with
+            this shorter text after turn 0 (saves tokens on turns 1+).
+        synthesis_prompt: Override the synthesis USER message injected at
+            the penultimate turn.
+        prefer_lang: Force output language. ``"zh"`` for Chinese, ``None``
+            for auto-detect from *user_message* content.
 
     Yields:
         AgentEvent instances for the caller to render.
@@ -94,7 +127,10 @@ async def run_agent_loop(
     ]
     if history:
         messages.extend(history)
-    messages.append(Message(role=Role.USER, content=user_message))
+    _chinese = prefer_lang == "zh" or (
+        prefer_lang is None and bool(_CJK_RE.search(user_message))
+    )
+    messages.append(Message(role=Role.USER, content=_prepend_lang_hint(user_message, explicit_lang=_chinese)))
 
     tool_defs = registry.all_definitions()
 
@@ -111,14 +147,28 @@ async def run_agent_loop(
             )
             break
 
-        # Context compression after turn 3
-        if ctx.should_compact(turn):
-            ctx.compact_tool_results(messages)
+        # Token-driven context compression
+        if usage.last_prompt_tokens > 0:
+            ctx.update_token_count(usage.last_prompt_tokens)
 
-        # Token budget check
-        if ctx.is_near_budget(messages):
-            yield AgentEvent(type="system", content="Compressing context...")
-            messages = ctx.distill(messages)
+        tier = ctx.needs_compaction()
+        if tier > 0:
+            budget_pct = ctx.get_budget_pct(messages)
+            actions = await ctx.compact(messages, backend=backend)
+            for t, desc in actions:
+                yield AgentEvent(
+                    type="system",
+                    content=f"Context compression (Tier {t}): {desc}",
+                    data={
+                        "compaction": {
+                            "tier": t,
+                            "budget_pct": round(budget_pct, 1),
+                            "tokens": ctx.current_tokens,
+                            "budget": ctx.budget,
+                        },
+                    },
+                )
+            usage.compaction_count = ctx.compaction_count
 
         # Reserve last 2 turns for synthesis (force no tools)
         remaining = MAX_TURNS - turn
@@ -126,21 +176,29 @@ async def run_agent_loop(
         is_final = (turn == MAX_TURNS - 1)
 
         if is_synthesis and remaining == 2:
-            messages.append(Message(
-                role=Role.USER,
-                content=(
-                    "You have gathered enough data. Now synthesize your "
-                    "findings into a comprehensive analysis. Do NOT call "
-                    "any more tools — provide your final diagnosis, root "
-                    "causes, and prioritized recommendations based on "
-                    "all the evidence collected above."
-                ),
-            ))
+            synth = synthesis_prompt or (
+                "You have gathered enough data. Now synthesize your "
+                "findings into a comprehensive analysis. Do NOT call "
+                "any more tools — provide your final diagnosis, root "
+                "causes, and prioritized recommendations based on "
+                "all the evidence collected above."
+            )
+            if _chinese:
+                synth = "（请用中文综合你的发现）\n\n" + synth
+            messages.append(Message(role=Role.USER, content=synth))
 
         # Call LLM with per-move timeout and retry
         t_turn = time.monotonic()
         response = None
         llm_error = None
+
+        # Debug: record the exact prompt sent to the LLM
+        record_prompt(
+            messages,
+            tools=tool_defs if not is_synthesis else None,
+            turn=turn + 1,
+        )
+
         for attempt in range(1 + max_retries):
             try:
                 response = await asyncio.wait_for(
@@ -186,7 +244,7 @@ async def run_agent_loop(
                 content=f"LLM error ({llm_error}): giving up after "
                         f"{max_retries + 1} attempts.",
             )
-            yield AgentEvent(type="done", data=_usage_dict(usage, t_start))
+            yield AgentEvent(type="done", data=_usage_dict(usage, t_start, ctx.budget))
             return
 
         llm_elapsed = time.monotonic() - t_turn
@@ -248,6 +306,9 @@ async def run_agent_loop(
                 default=str,
             )
 
+            # Debug: record tool call and result
+            record_tool(tc.name, tc.arguments, result_str, tool_elapsed, result.success)
+
             yield AgentEvent(
                 type="tool_result",
                 content=f"{tc.name}: {'OK' if result.success else 'ERROR'}",
@@ -265,6 +326,33 @@ async def run_agent_loop(
 
         # Emit turn timing
         turn_elapsed = time.monotonic() - t_turn
+
+        # After turn 0: trim system prompt to save tokens on subsequent turns
+        if turn == 0 and lean_system_prompt and messages[0].role == Role.SYSTEM:
+            old_len = len(messages[0].content)
+            messages[0] = Message(role=Role.SYSTEM, content=lean_system_prompt)
+            if _debug_level() > 0:
+                saved = old_len - len(lean_system_prompt)
+                yield AgentEvent(
+                    type="system",
+                    content=f"System prompt trimmed ({old_len:,} -> "
+                            f"{len(lean_system_prompt):,} chars, "
+                            f"saved ~{saved:,} chars per turn)",
+                )
+
+        # After turn 0: trim first user message if requested (saves tokens)
+        if turn == 0 and trim_user_after_turn0 is not None:
+            trimmed = _prepend_lang_hint(trim_user_after_turn0, explicit_lang=_chinese)
+            for i, m in enumerate(messages):
+                if m.role == Role.USER:
+                    messages[i] = Message(role=Role.USER, content=trimmed)
+                    if _debug_level() > 0:
+                        yield AgentEvent(
+                            type="system",
+                            content=f"User message trimmed to: {trim_user_after_turn0[:80]}",
+                        )
+                    break
+
         yield AgentEvent(
             type="system",
             content=f"Turn {turn + 1}: {turn_elapsed:.1f}s "
@@ -274,24 +362,45 @@ async def run_agent_loop(
 
         _log.debug("Agent at turn %d/%d (%.1fs)", turn + 1, MAX_TURNS, turn_elapsed)
 
-    yield AgentEvent(type="done", data=_usage_dict(usage, t_start))
+    yield AgentEvent(type="done", data=_usage_dict(usage, t_start, ctx.budget))
 
 
 def _update_usage(usage: AgentUsage, data: dict) -> None:
-    """Accumulate token usage from a turn."""
-    usage.prompt_tokens += data.get("prompt_tokens", 0)
-    usage.completion_tokens += data.get("completion_tokens", 0)
+    """Update token usage from a turn.
+
+    ``prompt_tokens`` from the API is the *current context size* (not
+    incremental), so we store it directly.  ``completion_tokens`` is
+    per-turn and should be accumulated.
+    """
+    prompt = data.get("prompt_tokens", 0)
+    completion = data.get("completion_tokens", 0)
+    if prompt == 0:
+        _log.warning("API returned prompt_tokens=0 (total_cost will undercount)")
+    usage.last_prompt_tokens = prompt
+    usage.peak_prompt_tokens = max(usage.peak_prompt_tokens, prompt)
+    usage.prompt_tokens = prompt
+    usage.completion_tokens += completion
+    usage.total_cost += prompt + completion  # real per-turn API cost
 
 
-def _usage_dict(usage: AgentUsage, t_start: float | None = None) -> dict:
+def _usage_dict(
+    usage: AgentUsage, t_start: float | None = None, budget: int = 0,
+) -> dict:
     """Convert AgentUsage to dict for AgentEvent.data."""
     d = {
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
-        "total_tokens": usage.prompt_tokens + usage.completion_tokens,
+        "total_tokens": usage.total_cost,
         "turns": usage.turns,
         "tool_calls": usage.tool_calls,
+        "peak_prompt_tokens": usage.peak_prompt_tokens,
+        "compaction_count": usage.compaction_count,
     }
+    if budget > 0:
+        d["budget"] = budget
+        d["budget_peak"] = usage.peak_prompt_tokens  # peak context size (pre-compact)
+        d["budget_remaining"] = max(0, budget - usage.peak_prompt_tokens)
+        d["budget_pct"] = round((usage.peak_prompt_tokens / budget) * 100, 1)
     if t_start is not None:
         d["total_elapsed"] = round(time.monotonic() - t_start, 1)
     return d

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import click
 from prompt_toolkit import PromptSession
@@ -24,16 +25,74 @@ from rich.panel import Panel
 
 from tachyon.cli.main import app
 from tachyon.config.settings import TachyonConfig
+from tachyon.llm.backend import Message, Role
 
 if TYPE_CHECKING:
-    from typing import Any
-
     from tachyon.analyzers.base import AnalyzerRegistry
     from tachyon.llm.backend import LLMBackend
     from tachyon.tools.context import SessionContext
     from tachyon.tools.registry import ToolRegistry
 
+# Reuse CJK detection from agent loop (single source of truth).
+from tachyon.agent.loop import _CJK_RE
+
+
 console = Console()
+
+
+@dataclass
+class _DeepSession:
+    """Encapsulates deep analysis mode state and stage logic."""
+
+    specs: list = field(default_factory=list)  # StageSpec list
+    stage: int = 0           # 0=not started, 1=metrics, 2=source+recommend
+    user_request: str | None = None  # original first user input
+    prefer_lang: str | None = None   # cached from first input
+
+    @property
+    def active(self) -> bool:
+        return bool(self.specs)
+
+    def begin_stage1(self, user_input: str) -> str:
+        """Build the stage 1 user message. Returns the user message to send."""
+        self.stage = 1
+        self.user_request = user_input
+        self.prefer_lang = (
+            "zh" if bool(_CJK_RE.search(user_input)) else None
+        )
+        return self.specs[0].prompt + "\n\n---\nUser request:\n" + user_input
+
+    def advance_stage(self) -> str | None:
+        """Advance to next stage. Returns stage prompt or None if done."""
+        if self.stage >= len(self.specs):
+            return None
+        self.stage += 1
+        spec = self.specs[self.stage - 1]
+        msg = spec.prompt
+        if self.user_request:
+            msg += "\n\n---\nUser request:\n" + self.user_request
+        return msg
+
+    @property
+    def is_stage1(self) -> bool:
+        return self.stage == 1
+
+    def augment_input(self, user_input: str) -> str:
+        """For stage 2+ follow-ups, prepend the original request."""
+        if self.stage >= 2 and self.user_request:
+            return self.user_request + "\n\n---\n" + user_input
+        return user_input
+
+    def loop_overrides(self) -> dict[str, Any]:
+        """Return extra kwargs for run_agent_loop based on current stage."""
+        overrides: dict[str, Any] = {}
+        if self.is_stage1:
+            stage_prompt = self.specs[0].prompt
+            overrides["trim_user_after_turn0"] = stage_prompt
+            overrides["synthesis_prompt"] = stage_prompt
+        if self.prefer_lang:
+            overrides["prefer_lang"] = self.prefer_lang
+        return overrides
 
 
 @app.command()
@@ -78,6 +137,10 @@ def chat(
     # Initialize i18n
     import tachyon.i18n as i18n
     i18n.init(config.output.lang)
+
+    # Initialize debug recording (no-op unless TACHYON_DEBUG_RECORD is set)
+    from tachyon.utils.debug_record import init as init_debug_record
+    init_debug_record()
 
     console.print(Panel.fit(
         "[bold cyan]Tachyon[/bold cyan] — AI-Powered CUDA Performance Analyzer",
@@ -214,12 +277,25 @@ async def _chat_loop(
     from tachyon.agent.loop import run_agent_loop
     from tachyon.agent.persona import (
         build_kernel_context,
+        build_lean_system_prompt,
         build_system_prompt,
     )
     from tachyon.utils.progress import AgentSpinner
 
     kernel_context = build_kernel_context(kernels)
     system_prompt = build_system_prompt(tool_registry, kernel_context)
+
+    # Deep mode: append stage overview to system prompt
+    deep_note = ""
+    if deep:
+        import tachyon.i18n as _i18n
+        deep_note = _i18n.t("stage.deep_mode.note", fallback="")
+        if deep_note:
+            system_prompt += "\n\n" + deep_note
+
+    # Lean system prompt: identity + tool catalog + key rules only.
+    # Applied after turn 0 to save ~2000 tokens per subsequent turn.
+    lean_prompt = build_lean_system_prompt(tool_registry, extra=deep_note)
 
     # Transparency: show user what context the AI agent has
     _show_agent_context(kernels, tool_registry)
@@ -229,12 +305,10 @@ async def _chat_loop(
     prompt_session: PromptSession[str] = PromptSession()
 
     # Deep mode state
-    deep_stage = 0  # 0=not started, 1=metrics, 2=source+recommend, 3=done
-    deep_auto_prompt_sent = False
-
+    ds = _DeepSession()
     if deep:
         from tachyon.analysis.stages import build_stage_prompts
-        _stage_specs = build_stage_prompts(mode="chat")
+        ds.specs = build_stage_prompts(mode="chat")
         console.print("[cyan]Deep analysis mode[/cyan]: Stage 1/2 — Metric Analysis")
         console.print("[dim]Type /next to jump to next stage, /help for commands.[/dim]")
 
@@ -257,29 +331,24 @@ async def _chat_loop(
             )
             if cmd_result is None:
                 break  # /quit
-            if cmd_result == "NEXT_STAGE" and deep:
-                # Manually advance to next stage
-                if deep_stage < len(_stage_specs):
-                    deep_stage += 1
-                    if deep_stage <= len(_stage_specs):
-                        spec = _stage_specs[deep_stage - 1]
-                        console.rule(f"[bold cyan]{spec.name}[/bold cyan]")
-                        user_input = spec.prompt
-                        # Fall through to agent loop
-                    else:
-                        console.print("[dim]All stages complete.[/dim]")
-                        continue
-                else:
+            if cmd_result == "NEXT_STAGE" and ds.active:
+                msg = ds.advance_stage()
+                if msg is None:
                     console.print("[dim]All stages complete.[/dim]")
                     continue
+                spec = ds.specs[ds.stage - 1]
+                console.rule(f"[bold cyan]{spec.name}[/bold cyan]")
+                user_input = msg  # fall through to agent loop
             else:
                 continue
 
-        # Deep mode: auto-inject stage prompt on first user message
-        if deep and deep_stage == 0 and not deep_auto_prompt_sent:
-            deep_auto_prompt_sent = True
-            deep_stage = 1
-            user_input = _stage_specs[0].prompt
+        # Deep mode: first input triggers stage 1
+        if ds.active and ds.stage == 0:
+            user_input = ds.begin_stage1(user_input)
+
+        # Deep mode stage 2+: prepend original request to follow-ups
+        if ds.active:
+            user_input = ds.augment_input(user_input)
 
         # Run agent loop — show tool calls in real time for transparency
         text_buffer = []
@@ -287,7 +356,7 @@ async def _chat_loop(
         spinner = AgentSpinner(timeout=timeout, console=console)
         spinner.start()
         try:
-            async for event in run_agent_loop(
+            loop_kwargs = dict(
                 backend=backend,
                 registry=tool_registry,
                 user_message=user_input,
@@ -296,7 +365,12 @@ async def _chat_loop(
                 stream=False,
                 timeout=timeout,
                 move_timeout=move_timeout,
-            ):
+                lean_system_prompt=lean_prompt,
+            )
+            if ds.active:
+                loop_kwargs.update(ds.loop_overrides())
+
+            async for event in run_agent_loop(**loop_kwargs):
                 if event.type == "text":
                     spinner.set_synthesizing()
                     text_buffer.append(event.content or "")
@@ -333,9 +407,23 @@ async def _chat_loop(
                         tokens = event.data.get("total_tokens", 0)
                         total_elapsed = event.data.get("total_elapsed", 0)
                         total_tokens += tokens
+
+                        budget = event.data.get("budget", 0)
+                        budget_pct = event.data.get("budget_pct", 0)
+                        budget_remaining = event.data.get("budget_remaining", 0)
+                        budget_str = ""
+                        if budget > 0:
+                            remaining_pct = round(
+                                (budget - budget_remaining) / budget * 100, 1
+                            )
+                            budget_str = (
+                                f", ctx {budget_remaining:,}/{budget:,} "
+                                f"({remaining_pct}% used, {100 - remaining_pct:.0f}% remaining)"
+                            )
+
                         console.print(
-                            f"  [dim]Done: {turns} turns, {n_tools} tool calls, "
-                            f"{tokens:,} tokens, {total_elapsed:.1f}s[/dim]"
+                            f"  [dim]Done: {turns} turns, {n_tools} tools, "
+                            f"{tokens:,} tokens{budget_str}, {total_elapsed:.1f}s[/dim]"
                         )
         finally:
             spinner.stop()
@@ -357,7 +445,7 @@ async def _chat_loop(
             history.append(Message(role=Role.ASSISTANT, content=full_text))
 
         # Deep mode: prompt for stage transition after agent completes
-        if deep and deep_stage == 1 and full_text:
+        if ds.is_stage1 and full_text:
             console.print(
                 "\n[dim]Stage 1 complete. Type [bold]/next[/bold] to proceed to "
                 "Stage 2 (Source Attribution + Recommendations), "

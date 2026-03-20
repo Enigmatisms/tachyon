@@ -335,14 +335,13 @@ class TestDataQueryTools:
 
     @pytest.mark.asyncio
     async def test_get_kernel_metrics_all(self, data_registry: ToolRegistry):
-        """get_kernel_metrics without filter should return all metrics."""
+        """get_kernel_metrics without filter should return all metrics with summary."""
         result = await data_registry.execute("get_kernel_metrics", {"kernel_id": 0})
         assert result.success is True
-        # compute_bound fixture has 2 metrics
-        assert len(result.data) == 2
-        for _name, entry in result.data.items():
-            assert "value" in entry
-            assert "unit" in entry
+        assert "_metric_count" in result.data
+        assert result.data["_metric_count"] == 2
+        assert "_top_metrics" in result.data
+        assert len(result.data["_top_metrics"]) == 2
 
     @pytest.mark.asyncio
     async def test_get_kernel_metrics_filtered(self, data_registry: ToolRegistry):
@@ -382,8 +381,8 @@ class TestDataQueryTools:
         """get_kernel_metrics for kernel_id=1 should return memory-bound metrics."""
         result = await data_registry.execute("get_kernel_metrics", {"kernel_id": 1})
         assert result.success is True
-        # memory_bound fixture has 7 metrics
-        assert len(result.data) >= 5
+        assert "_metric_count" in result.data
+        assert result.data["_metric_count"] >= 5
 
     # --- get_kernel_summary ---
 

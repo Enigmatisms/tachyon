@@ -40,6 +40,9 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
                     "grid": list(k.launch_params.grid),
                     "block": list(k.launch_params.block),
                     "registers": k.launch_params.registers_per_thread,
+                    "duration_ms": round(
+                        (k.metric_value("gpu__time_duration.sum") or 0) / 1e6, 2
+                    ),
                 })
             return ToolResult.ok(items)
         except Exception as e:
@@ -82,8 +85,18 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
                     else:
                         result[name] = None
             else:
-                for name, mv in kernel.metrics.items():
-                    result[name] = {"value": mv.value, "unit": mv.unit}
+                all_metrics = [
+                    (name, mv.value, mv.unit)
+                    for name, mv in kernel.metrics.items()
+                    if mv is not None
+                ]
+                all_metrics.sort(key=lambda x: abs(x[1]), reverse=True)
+                result["_metric_count"] = len(all_metrics)
+                if all_metrics:
+                    result["_top_metrics"] = [
+                        {"name": n, "value": round(v, 2), "unit": u}
+                        for n, v, u in all_metrics[:15]
+                    ]
             return ToolResult.ok(result)
         except IndexError as e:
             return ToolResult.fail(ErrorCode.METRIC_NOT_FOUND, str(e))
@@ -120,8 +133,13 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
         """Get a concise summary of a kernel's characteristics."""
         try:
             k = ctx.get_kernel(kernel_id)
+            duration_ms = round(
+                (k.metric_value("gpu__time_duration.sum") or 0) / 1e6, 2
+            )
             summary = {
+                "kernel_id": kernel_id,
                 "name": k.demangled_name or k.kernel_name,
+                "duration_ms": duration_ms,
                 "launch": {
                     "grid": list(k.launch_params.grid),
                     "block": list(k.launch_params.block),
