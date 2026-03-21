@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -30,6 +31,7 @@ from tachyon.llm.backend import Message, Role
 
 if TYPE_CHECKING:
     from tachyon.analyzers.base import AnalyzerRegistry
+    from tachyon.chat.export import ChatHistory
     from tachyon.llm.backend import LLMBackend
     from tachyon.tools.context import SessionContext
     from tachyon.tools.registry import ToolRegistry
@@ -262,6 +264,7 @@ def chat(
         backend, tool_registry, kernels, verbose,
         config.llm.timeout, config.llm.move_timeout,
         deep=deep,
+        model_info=f"{config.llm.provider}/{config.llm.model}",
     ))
 
 
@@ -273,6 +276,7 @@ async def _chat_loop(
     timeout: int = 600,
     move_timeout: int = 120,
     deep: bool = False,
+    model_info: str = "",
 ) -> None:
     """Main interactive chat loop."""
     from tachyon.agent.loop import run_agent_loop
@@ -280,6 +284,12 @@ async def _chat_loop(
         build_kernel_context,
         build_lean_system_prompt,
         build_system_prompt,
+    )
+    from tachyon.chat.export import (
+        ChatHistory,
+        ToolCallRecord,
+        TurnRecord,
+        UsageRecord,
     )
     from tachyon.utils.progress import ChatStatusDisplay
 
@@ -303,6 +313,7 @@ async def _chat_loop(
 
     history = []
     total_tokens = 0
+    history_records = ChatHistory(model_info=model_info)
     prompt_session: PromptSession[str] = PromptSession()
 
     # Deep mode state
@@ -331,6 +342,7 @@ async def _chat_loop(
         if user_input.startswith("/"):
             cmd_result = _handle_command(
                 user_input, kernels, tool_registry, total_tokens,
+                history_records,
             )
             if cmd_result is None:
                 break  # /quit
@@ -356,6 +368,9 @@ async def _chat_loop(
         # Run agent loop — show tool calls in real time for transparency
         text_buffer = []
         tool_calls_made: list[str] = []
+        tool_call_records: list[ToolCallRecord] = []
+        pending_tool_args: dict[str, dict] = {}
+        done_data: dict = {}
         display = ChatStatusDisplay(timeout=timeout, console=console, collapsed=_collapsed)
         display.start()
         try:
@@ -385,6 +400,7 @@ async def _chat_loop(
                     display.set_tool(name)
                     args = event.data.get("arguments", {}) if event.data else {}
                     tool_calls_made.append(name)
+                    pending_tool_args[name] = args
                     args_short = ", ".join(
                         f"{k}={v}" for k, v in list(args.items())[:3]
                     )
@@ -394,6 +410,14 @@ async def _chat_loop(
                 elif event.type == "tool_result":
                     display.set_status("waiting for LLM")
                     if event.data:
+                        tc_name = event.data.get("name", "")
+                        tool_call_records.append(ToolCallRecord(
+                            name=tc_name,
+                            arguments=pending_tool_args.pop(tc_name, {}),
+                            success=event.data.get("success", False),
+                            summary=event.data.get("summary", ""),
+                            elapsed=event.data.get("elapsed", 0),
+                        ))
                         summary = event.data.get("summary", "")
                         ok = "\u2713" if event.data.get("success") else "\u2717"
                         t = event.data.get("elapsed", 0)
@@ -410,16 +434,17 @@ async def _chat_loop(
                     _collapsed = display.collapsed  # persist toggle state
                     display.stop()
                     display.flush()  # print tool entries to scrollback
-                    if event.data:
-                        turns = event.data.get("turns", 0)
-                        n_tools = event.data.get("tool_calls", 0)
-                        tokens = event.data.get("total_tokens", 0)
-                        total_elapsed = event.data.get("total_elapsed", 0)
+                    done_data = event.data or {}
+                    if done_data:
+                        turns = done_data.get("turns", 0)
+                        n_tools = done_data.get("tool_calls", 0)
+                        tokens = done_data.get("total_tokens", 0)
+                        total_elapsed = done_data.get("total_elapsed", 0)
                         total_tokens += tokens
 
-                        budget = event.data.get("budget", 0)
-                        budget_pct = event.data.get("budget_pct", 0)
-                        budget_remaining = event.data.get("budget_remaining", 0)
+                        budget = done_data.get("budget", 0)
+                        budget_pct = done_data.get("budget_pct", 0)
+                        budget_remaining = done_data.get("budget_remaining", 0)
                         budget_str = ""
                         if budget > 0:
                             remaining_pct = round(
@@ -442,6 +467,28 @@ async def _chat_loop(
 
         # Render collected text as markdown
         full_text = "".join(text_buffer)
+
+        # Record turn for /export
+        usage_rec = None
+        if done_data:
+            usage_rec = UsageRecord(
+                turns=done_data.get("turns", 0),
+                tool_calls=done_data.get("tool_calls", 0),
+                total_tokens=done_data.get("total_tokens", 0),
+                total_elapsed=done_data.get("total_elapsed", 0),
+                budget=done_data.get("budget", 0),
+                budget_peak=done_data.get("budget_peak", 0),
+                budget_remaining=done_data.get("budget_remaining", 0),
+                budget_pct=done_data.get("budget_pct", 0),
+                compaction_count=done_data.get("compaction_count", 0),
+            )
+        history_records.record_turn(TurnRecord(
+            user_input=user_input,
+            ai_response=full_text,
+            tool_calls=tool_call_records,
+            usage=usage_rec,
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ))
         if full_text:
             console.print()
             console.print(Panel(
@@ -470,6 +517,7 @@ def _handle_command(
     kernels: list,
     registry: ToolRegistry,
     total_tokens: int,
+    history_records: ChatHistory | None = None,
 ) -> bool | None | str:
     """Handle special /commands. Returns None for /quit, True otherwise, 'NEXT_STAGE' for /next."""
     parts = cmd.split()
@@ -485,6 +533,8 @@ def _handle_command(
             "[bold]/kernels[/bold] — List loaded kernels\n"
             "[bold]/tree <id>[/bold] — Show OptTree for kernel\n"
             "[bold]/tokens[/bold] — Show token usage\n"
+            "[bold]/export [path][/bold] — Export last turn to markdown\n"
+            "[bold]/export-all [path][/bold] — Export all turns to markdown\n"
             "[bold]/next[/bold] — Jump to next analysis stage (deep mode)\n"
             "[bold]/quit[/bold] — Exit chat",
             title="Commands",
@@ -508,6 +558,49 @@ def _handle_command(
 
     if command == "/next":
         return "NEXT_STAGE"
+
+    if command == "/export":
+        if history_records is None or not history_records.turns:
+            console.print("[red]No turns to export yet.[/red]")
+            return True
+        from tachyon.chat.export import (
+            render_turn_markdown,
+            write_export,
+        )
+        path = parts[1] if len(parts) > 1 else "chat-export.md"
+        last = history_records.last_turn()
+        if last is None:
+            console.print("[red]No turns to export.[/red]")
+            return True
+        content = render_turn_markdown(last, history_records.model_info)
+        try:
+            resolved = write_export(content, path)
+            console.print(f"[green]Exported to {resolved}[/green]")
+        except OSError as e:
+            console.print(f"[red]Export failed: {e}[/red]")
+        return True
+
+    if command == "/export-all":
+        if history_records is None or not history_records.turns:
+            console.print("[red]No turns to export yet.[/red]")
+            return True
+        from tachyon.chat.export import (
+            render_all_turns_markdown,
+            write_export,
+        )
+        path = parts[1] if len(parts) > 1 else "chat-export-all.md"
+        content = render_all_turns_markdown(
+            history_records.turns, history_records.model_info,
+        )
+        try:
+            resolved = write_export(content, path)
+            console.print(
+                f"[green]Exported {len(history_records.turns)} turns "
+                f"to {resolved}[/green]"
+            )
+        except OSError as e:
+            console.print(f"[red]Export failed: {e}[/red]")
+        return True
 
     console.print(f"[red]Unknown command: {command}[/red]. Type /help.")
     return True

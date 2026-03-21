@@ -45,6 +45,10 @@ from tachyon.config.settings import TachyonConfig
     "--quiet", "-q", is_flag=True, help="Show only CRITICAL findings.",
 )
 @click.option("--lang", default=None, help="Language (en/zh).")
+@click.option(
+    "--export", type=click.Path(path_type=Path), default=None,
+    help="Export AI analysis to markdown file.",
+)
 def analyze(
     report_path: Path,
     output: Path | None,
@@ -54,6 +58,7 @@ def analyze(
     verbose: bool,
     quiet: bool,
     lang: str | None,
+    export: Path | None,
 ) -> None:
     """Analyze an existing NCU report file.
 
@@ -65,6 +70,7 @@ def analyze(
         tachyon analyze report.ncu-rep
         tachyon analyze report.ncu-rep --kernel "matmul*"
         tachyon analyze report.ncu-rep --no-ai -v
+        tachyon analyze report.ncu-rep --export analysis.md
     """
     log_level = logging.DEBUG if verbose else (logging.WARNING if quiet else logging.INFO)
     logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
@@ -85,4 +91,5 @@ def analyze(
         quiet=quiet,
         no_ai=no_ai,
         output_file=output,
+        ai_output_file=export,
     )

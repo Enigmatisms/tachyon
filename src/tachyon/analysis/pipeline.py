@@ -546,6 +546,7 @@ def run_analysis(
     no_ai: bool = False,
     output_file: Path | None = None,
     ai_layers: int = 1,
+    ai_output_file: Path | None = None,
 ) -> None:
     """Complete analysis pipeline: load → merge → rules → render → AI.
 
@@ -561,6 +562,7 @@ def run_analysis(
         no_ai: Skip AI-enhanced analysis.
         output_file: Write output to file instead of stdout.
         ai_layers: Number of AI analysis stages (1=single, 2=deep, 3=radical).
+        ai_output_file: Write AI analysis Markdown to this file.
     """
     import sys
 
@@ -623,6 +625,10 @@ def run_analysis(
         ai_text = try_ai_analysis(reports, findings_map, config, reader=reader, verbose=verbose, report_path=report_path, ai_layers=ai_layers)
         if ai_text:
             console.print(Markdown(ai_text))
+            if ai_output_file:
+                from tachyon.chat.export import write_export
+                resolved = write_export(ai_text, ai_output_file)
+                console.print(f"  [dim]AI analysis exported to {resolved}[/dim]")
         else:
             key_env = config.llm.api_key_env
             provider = config.llm.provider
