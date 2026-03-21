@@ -3,7 +3,8 @@
 Usage::
 
     tachyon profile ./app --size 1024
-    tachyon profile --strategy radical ./app --size 1024
+    tachyon profile --deep ./app --size 1024
+    tachyon profile --radical ./app --size 1024
     tachyon profile --kernel matmul_kernel ./app
     tachyon profile --no-ai ./app          # Rule-Only, no LLM
 
@@ -27,10 +28,12 @@ from tachyon.config.settings import TachyonConfig
 @click.argument("executable")
 @click.argument("exe_args", nargs=-1)
 @click.option(
-    "--strategy",
-    type=click.Choice(["conservative", "radical"]),
-    default=None,
-    help="Profiling strategy (default: from config).",
+    "--deep", "depth", flag_value="deep", default=None,
+    help="2-layer analysis: metrics + source attribution.",
+)
+@click.option(
+    "--radical", "depth", flag_value="radical", default=None,
+    help="3-layer analysis with aggressive NCU profiling.",
 )
 @click.option(
     "--kernel", "-k",
@@ -68,7 +71,6 @@ from tachyon.config.settings import TachyonConfig
     help="Save outputs to this directory.",
 )
 @click.option("--no-ai", is_flag=True, help="Skip AI analysis (Rule-Only).")
-@click.option("--deep", is_flag=True, help="Multi-stage deep analysis (3 stages).")
 @click.option("--lang", default=None, help="Language (en/zh).")
 @click.option(
     "--model", type=str, default=None, help="LLM model override.",
@@ -79,7 +81,7 @@ from tachyon.config.settings import TachyonConfig
 def profile(
     executable: str,
     exe_args: tuple[str, ...],
-    strategy: str | None,
+    depth: str | None,
     kernel: tuple[str, ...],
     top_k: int,
     ncu_args: str | None,
@@ -87,7 +89,6 @@ def profile(
     ncu_metrics: str | None,
     output: Path | None,
     no_ai: bool,
-    deep: bool,
     lang: str | None,
     model: str | None,
     verbose: bool,
@@ -100,7 +101,8 @@ def profile(
     \b
     Examples:
         tachyon profile ./matmul
-        tachyon profile --strategy radical ./app --batch 32
+        tachyon profile --deep ./app --batch 32
+        tachyon profile --radical ./app --batch 32
         tachyon profile --kernel "matmul_*" --top-k 3 ./app
         tachyon profile --no-ai ./app
     """
@@ -108,16 +110,18 @@ def profile(
     logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
 
     config = TachyonConfig.load()
-    config.apply_cli_overrides(model=model, strategy=strategy)
+    config.apply_cli_overrides(model=model, depth=depth)
     if lang:
         config.output.lang = lang
 
-    from tachyon.profiler.ncu_profiler import ProfilingStrategy
+    from tachyon.profiler.ncu_profiler import AnalysisDepth, DEPTH_CONFIGS
     from tachyon.profiler.pipeline import run_profiling_pipeline
     from tachyon.utils.progress import console, print_error_panel, print_profile_summary
 
+    analysis_depth = AnalysisDepth(depth) if depth else AnalysisDepth.BASIC
+    ncu_strategy, ai_layers = DEPTH_CONFIGS[analysis_depth]
+
     extra_ncu = ncu_args.split() if ncu_args else None
-    strat = ProfilingStrategy(strategy) if strategy else None
 
     # Convert glob patterns to NCU regexes
     kernel_list: list[str] | None = None
@@ -128,7 +132,7 @@ def profile(
     # Display profiling configuration
     print_profile_summary(
         executable=executable,
-        strategy=strategy or config.profiling.strategy,
+        depth=analysis_depth.value,
         kernels=list(kernel) if kernel else None,
         ncu_set=ncu_set,
         ncu_metrics=ncu_metrics,
@@ -141,7 +145,7 @@ def profile(
             executable=executable,
             exe_args=list(exe_args),
             config=config,
-            strategy=strat,
+            strategy=ncu_strategy,
             top_k=top_k,
             kernel_filter=kernel_list,
             output_dir=output,
@@ -177,5 +181,9 @@ def profile(
         verbose=verbose,
         no_ai=no_ai,
         output_file=(output / "analysis.txt") if output else None,
-        deep=deep,
+        ai_layers=ai_layers,
     )
+
+    # ── Depth hint ──
+    from tachyon.utils.progress import print_depth_hint
+    print_depth_hint(analysis_depth)

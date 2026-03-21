@@ -15,7 +15,7 @@ class TestDefaultConfig:
         assert cfg.llm.model == "gpt-4o"
         assert cfg.llm.api_key is None
         assert cfg.llm.api_key_env == "OPENAI_API_KEY"
-        assert cfg.profiling.strategy == "conservative"
+        assert cfg.profiling.depth == "basic"
         assert cfg.output.lang == ""
         assert cfg.output.format == "terminal"
         assert cfg.tools.ncu_path is None
@@ -38,7 +38,7 @@ model = "claude-3-opus"
 temperature = 0.5
 
 [profiling]
-strategy = "radical"
+depth = "radical"
 
 [output]
 lang = "zh"
@@ -51,7 +51,7 @@ ncu_path = "/custom/ncu"
         assert cfg.llm.provider == "anthropic"
         assert cfg.llm.model == "claude-3-opus"
         assert cfg.llm.temperature == 0.5
-        assert cfg.profiling.strategy == "radical"
+        assert cfg.profiling.depth == "radical"
         assert cfg.output.lang == "zh"
         assert cfg.output.format == "markdown"
         assert cfg.tools.ncu_path == "/custom/ncu"
@@ -63,7 +63,7 @@ class TestEnvOverride:
             "TACHYON_LLM_PROVIDER": "litellm",
             "TACHYON_MODEL": "gpt-4-turbo",
             "TACHYON_LANG": "zh",
-            "TACHYON_STRATEGY": "radical",
+            "TACHYON_DEPTH": "radical",
         }
         with patch.dict(os.environ, env, clear=False):
             cfg = TachyonConfig()
@@ -71,7 +71,17 @@ class TestEnvOverride:
             assert cfg.llm.provider == "litellm"
             assert cfg.llm.model == "gpt-4-turbo"
             assert cfg.output.lang == "zh"
-            assert cfg.profiling.strategy == "radical"
+            assert cfg.profiling.depth == "radical"
+
+    def test_env_strategy_backward_compat(self):
+        """TACHYON_STRATEGY still works for backward compatibility."""
+        env = {
+            "TACHYON_STRATEGY": "radical",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            cfg = TachyonConfig()
+            cfg._apply_env()
+            assert cfg.profiling.depth == "radical"
 
     def test_env_ncu_report_path(self):
         with patch.dict(os.environ, {"TACHYON_NCU_REPORT_PATH": "/my/ncu"}):
@@ -108,12 +118,12 @@ class TestCliOverride:
             model="custom-model",
             lang="zh",
             format="json",
-            strategy="radical",
+            depth="radical",
         )
         assert cfg.llm.model == "custom-model"
         assert cfg.output.lang == "zh"
         assert cfg.output.format == "json"
-        assert cfg.profiling.strategy == "radical"
+        assert cfg.profiling.depth == "radical"
 
     def test_cli_partial_override(self):
         cfg = TachyonConfig()

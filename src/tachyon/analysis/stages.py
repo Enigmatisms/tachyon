@@ -5,6 +5,9 @@ sequential stages, each with a focused prompt and independent tool budget.
 This gives the LLM more "thinking room" per phase and produces deeper,
 more actionable output.
 
+Stages communicate via **scratch board**: a structured summary extracted
+from each stage's output and injected into subsequent stage prompts.
+
 Usage::
 
     from tachyon.analysis.stages import build_stage_prompts, run_staged_analysis
@@ -18,6 +21,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -77,6 +81,16 @@ Based on the analysis results from the first two stages, provide a comprehensive
 
 Output format: Numbered list sorted by priority, each containing [Problem] [Root Cause] [Solution] [Expected Effect] [Priority]."""
 
+_FALLBACK_SCRATCH_BOARD_S1 = """
+**Scratch Board**: End your analysis with a `<scratch_board>` section containing:
+- Top-3 hotspots (kernel_id + bottleneck type + key metric values)
+- Unusual patterns needing source-level investigation"""
+
+_FALLBACK_SCRATCH_BOARD_S2 = """
+**Scratch Board**: End with a `<scratch_board>` section containing:
+- Top-3 root causes (file:line + evidence: SPI, stall, SASS)
+- Optimization opportunities sorted by estimated impact"""
+
 
 # ---------------------------------------------------------------------------
 # StageSpec
@@ -89,6 +103,14 @@ class StageSpec:
     name: str  # "Stage 1: Metric Analysis"
     prompt: str  # user prompt for this stage
     max_turns: int = 10
+
+
+@dataclass
+class StageResult:
+    """Result from one analysis stage."""
+
+    text: str                    # cleaned output (scratch board stripped)
+    done_data: dict[str, Any]    # token usage etc from "done" event
 
 
 # ---------------------------------------------------------------------------
@@ -104,26 +126,43 @@ def build_stage_prompts(
     when i18n is not initialized.
 
     Args:
-        mode: "profile" for 3 stages, "chat" for 2 stages.
+        mode: "profile" or "radical" for 3 stages, "deep" for 2 stages,
+              "chat" for 2 stages (different prompts).
 
     Returns:
         List of StageSpec objects.
     """
     from tachyon.i18n import t
 
-    if mode == "profile":
+    if mode in ("profile", "radical"):
+        s1_hint = t("scratch_board.stage1_hint", fallback=_FALLBACK_SCRATCH_BOARD_S1)
+        s2_hint = t("scratch_board.stage2_hint", fallback=_FALLBACK_SCRATCH_BOARD_S2)
         return [
             StageSpec(
                 name=t("stage.name.one", fallback="Stage 1: Metric Analysis"),
-                prompt=t("stage.1.metrics.prompt", fallback=_FALLBACK_STAGE_1),
+                prompt=t("stage.1.metrics.prompt", fallback=_FALLBACK_STAGE_1) + s1_hint,
             ),
             StageSpec(
                 name=t("stage.name.two", fallback="Stage 2: Source Attribution"),
-                prompt=t("stage.2.source.prompt", fallback=_FALLBACK_STAGE_2),
+                prompt=t("stage.2.source.prompt", fallback=_FALLBACK_STAGE_2) + s2_hint,
             ),
             StageSpec(
                 name=t("stage.name.three", fallback="Stage 3: Optimization Plan"),
                 prompt=t("stage.3.recommend.prompt", fallback=_FALLBACK_STAGE_3),
+            ),
+        ]
+    elif mode == "deep":
+        s1_hint = t("scratch_board.stage1_hint", fallback=_FALLBACK_SCRATCH_BOARD_S1)
+        # Deep mode: 2 stages — metrics + source/recommend combined
+        combined_prompt = t("stage.2.source.prompt", fallback=_FALLBACK_STAGE_2) + "\n\n" + t("stage.3.recommend.prompt", fallback=_FALLBACK_STAGE_3)
+        return [
+            StageSpec(
+                name=t("stage.name.one", fallback="Stage 1: Metric Analysis"),
+                prompt=t("stage.1.metrics.prompt", fallback=_FALLBACK_STAGE_1) + s1_hint,
+            ),
+            StageSpec(
+                name=t("stage.name.combined", fallback="Stage 2: Source & Optimization"),
+                prompt=combined_prompt,
             ),
         ]
     else:
@@ -142,6 +181,29 @@ def build_stage_prompts(
 
 
 # ---------------------------------------------------------------------------
+# Scratch board extraction
+# ---------------------------------------------------------------------------
+
+_SCRATCH_BOARD_RE = re.compile(
+    r"<scratch_board>(.*?)</scratch_board>", re.DOTALL
+)
+
+
+def _extract_scratch_board(text: str) -> tuple[str, str]:
+    """Extract scratch board from stage output.
+
+    Returns (cleaned_text, scratch_board_content).
+    If no scratch board found, returns (text, "").
+    """
+    match = _SCRATCH_BOARD_RE.search(text)
+    if match:
+        board = match.group(1).strip()
+        cleaned = (text[:match.start()] + text[match.end():]).rstrip()
+        return cleaned, board
+    return text, ""
+
+
+# ---------------------------------------------------------------------------
 # run_staged_analysis
 # ---------------------------------------------------------------------------
 
@@ -155,8 +217,9 @@ async def run_staged_analysis(
     timeout_per_stage: int = 300,
     move_timeout: int = 120,
     render_fn: Callable[[int, str, str], None] | None = None,
-) -> list[str]:
-    """Run multi-stage analysis, returning text from each stage.
+    status_display: Any = None,  # AnalysisStatusDisplay, typed Any to avoid circular import
+) -> list[StageResult]:
+    """Run multi-stage analysis, returning StageResult from each stage.
 
     Each stage reuses the same backend and registry, but runs its own
     agent loop with a fresh user prompt. The full text output of each
@@ -173,16 +236,19 @@ async def run_staged_analysis(
         timeout_per_stage: Timeout per stage in seconds.
         move_timeout: Per-move timeout for LLM calls.
         render_fn: Optional callback(stage_idx, stage_name, text) for
-                   real-time display.
+                   real-time display. Only used when ``status_display`` is None.
+        status_display: Optional AnalysisStatusDisplay for compact live status.
 
     Returns:
-        List of markdown strings, one per stage.
+        List of StageResult objects, one per stage.
     """
     from tachyon.agent.loop import run_agent_loop
     from tachyon.i18n import t
 
-    results: list[str] = []
+    results: list[StageResult] = []
+    scratch_boards: list[str] = []
     context_header = t("stage.context.previous", fallback="Below are the analysis results from previous stages (complete content). Continue building on this:")
+    scratch_context_header = t("scratch_board.context", fallback="Key findings from previous stages:")
 
     for idx, spec in enumerate(stage_specs):
         # Build user message for this stage
@@ -190,22 +256,40 @@ async def run_staged_analysis(
             # Stage 1: pre-computed data + stage-specific instructions
             stage_user_msg = user_prompt + "\n\n" + spec.prompt
         else:
-            # Subsequent stages: inject ALL previous stage outputs as context.
-            # This gives the LLM the complete analysis so far, avoiding
-            # the need to re-call tools just to recover data from prior stages.
-            prev_outputs = "\n\n---\n\n".join(
-                f"### {stage_specs[i].name}\n{results[i]}"
-                for i in range(len(results))
-            )
-            stage_user_msg = (
-                f"{context_header}\n\n"
-                f"<previous_stage_output>\n{prev_outputs}\n</previous_stage_output>\n\n"
-                + spec.prompt
-            )
+            # Subsequent stages: prefer scratch boards for compact context.
+            # Fallback to full previous output if scratch boards are empty.
+            if any(scratch_boards):
+                board_context = "\n".join(
+                    f"### {stage_specs[i].name}\n{scratch_boards[i]}"
+                    for i in range(len(scratch_boards))
+                    if scratch_boards[i]
+                )
+                stage_user_msg = (
+                    f"{scratch_context_header}\n\n"
+                    f"<scratch_boards>\n{board_context}\n</scratch_boards>\n\n"
+                    + spec.prompt
+                )
+            else:
+                # Fallback: inject ALL previous stage outputs as context.
+                prev_outputs = "\n\n---\n\n".join(
+                    f"### {stage_specs[i].name}\n{results[i]}"
+                    for i in range(len(results))
+                )
+                stage_user_msg = (
+                    f"{context_header}\n\n"
+                    f"<previous_stage_output>\n{prev_outputs}\n</previous_stage_output>\n\n"
+                    + spec.prompt
+                )
 
         # Collect output from this stage's agent loop
         text_parts: list[str] = []
         tool_calls_made: list[str] = []
+        done_data: dict[str, Any] = {}
+
+        # Update status display for this stage
+        if status_display:
+            status_display.set_stage(idx, len(stage_specs))
+            status_display.set_status("waiting for LLM")
 
         try:
             from tachyon.agent.context import DEEP_TOKEN_BUDGET
@@ -227,20 +311,35 @@ async def run_staged_analysis(
             ):
                 if event.type == "text" and event.content:
                     text_parts.append(event.content)
+                    if status_display:
+                        status_display.set_synthesizing()
                 elif event.type == "tool_call":
                     name = event.data["name"] if event.data else "?"
                     tool_calls_made.append(name)
-                    if render_fn:
+                    if status_display:
+                        status_display.set_tool(name)
+                    elif render_fn:
                         render_fn(idx, spec.name, f"[tool] {name}")
+                elif event.type == "tool_result":
+                    if status_display:
+                        status_display.set_status("waiting for LLM")
                 elif event.type == "system":
-                    if render_fn and event.content:
+                    if render_fn and not status_display and event.content:
                         render_fn(idx, spec.name, event.content)
+                elif event.type == "done":
+                    if event.data:
+                        done_data = event.data
         except Exception as e:
             logger.warning("Stage %d (%s) failed: %s", idx, spec.name, e)
             text_parts.append(f"*(Stage {idx + 1} failed: {e})*")
 
         stage_text = "".join(text_parts) or f"*(No output for {spec.name})*"
-        results.append(stage_text)
+
+        # Extract scratch board for inter-stage context passing.
+        # Rendered output (results) gets the cleaned text without scratch board.
+        cleaned_text, board = _extract_scratch_board(stage_text)
+        scratch_boards.append(board)
+        results.append(StageResult(text=cleaned_text, done_data=done_data))
 
         logger.info(
             "Stage %d/%d complete: %s (%d tool calls, %d chars)",

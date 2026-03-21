@@ -330,7 +330,7 @@ def try_ai_analysis(
     reader: Any = None,
     verbose: bool = False,
     report_path: Path | None = None,
-    deep: bool = False,
+    ai_layers: int = 1,
 ) -> str | None:
     """Run AI-enhanced analysis. Returns markdown text or None if unavailable.
 
@@ -342,7 +342,7 @@ def try_ai_analysis(
         config: Tachyon configuration.
         reader: NcuReportReader instance for source correlation (ActionHandle).
         verbose: Show AI context and tool calls.
-        deep: Use multi-stage deep analysis (3 stages for profile).
+        ai_layers: Number of AI analysis stages (1=single, 2=deep, 3=radical).
     """
     from tachyon.utils.progress import console
 
@@ -354,9 +354,9 @@ def try_ai_analysis(
     if not user_prompt:
         return None
 
-    # For deep mode: build a data-only prompt (no tool-calling instructions)
+    # For multi-layer mode: build a data-only prompt (no tool-calling instructions)
     # so that stage-specific prompts can control tool usage without conflict
-    data_only_prompt = build_ai_prompt(reports, findings_map, instructions=False) if deep else user_prompt
+    data_only_prompt = build_ai_prompt(reports, findings_map, instructions=False) if ai_layers > 1 else user_prompt
 
     # Transparency: show excerpt of what's being sent to AI
     _show_ai_context(reports, findings_map, verbose)
@@ -447,14 +447,15 @@ def try_ai_analysis(
     import asyncio
 
     from tachyon.agent.loop import run_agent_loop
-    from tachyon.utils.progress import AgentSpinner
+    from tachyon.utils.progress import AnalysisStatusDisplay, print_token_summary
 
     async def _run_single() -> str:
         """Single-shot agent loop (default behavior)."""
         text_parts: list[str] = []
-        tool_calls_made: list[str] = []
-        spinner = AgentSpinner(timeout=config.llm.timeout, console=console)
-        spinner.start()
+        done_data: dict = {}
+
+        display = AnalysisStatusDisplay(timeout=config.llm.timeout, console=console)
+        display.start()
         try:
             async for event in run_agent_loop(
                 backend=backend,
@@ -466,60 +467,64 @@ def try_ai_analysis(
                 move_timeout=config.llm.move_timeout,
             ):
                 if event.type == "text" and event.content:
-                    spinner.set_synthesizing()
+                    display.set_synthesizing()
                     text_parts.append(event.content)
                 elif event.type == "tool_call":
                     name = event.data["name"] if event.data else "?"
-                    spinner.set_tool(name)
-                    tool_calls_made.append(name)
-                    if verbose:
-                        console.print(f"  [dim]→ {event.content}[/dim]")
+                    display.set_tool(name)
                 elif event.type == "tool_result":
-                    spinner.set_status("waiting for LLM")
-                    if verbose:
-                        console.print(f"  [dim]← {event.content}[/dim]")
+                    display.set_status("waiting for LLM")
+                elif event.type == "done":
+                    if event.data:
+                        done_data = event.data
         finally:
-            spinner.stop()
-        if tool_calls_made:
-            console.print(
-                f"  [dim]Agent tool calls: "
-                f"{' → '.join(tool_calls_made)}[/dim]"
-            )
+            display.stop()
+
+        if done_data:
+            print_token_summary(done_data)
+
         return "".join(text_parts)
 
-    async def _run_deep() -> str:
+    async def _run_staged(ai_layers: int) -> str:
         """Multi-stage deep analysis."""
         from tachyon.analysis.stages import build_stage_prompts, run_staged_analysis
 
-        stage_specs = build_stage_prompts(mode="profile")
+        mode = "deep" if ai_layers == 2 else "radical"
+        stage_specs = build_stage_prompts(mode=mode)
 
-        def _render(stage_idx: int, stage_name: str, text: str) -> None:
-            if verbose:
-                console.print(f"  [dim]  [{stage_name}] {text[:100]}[/dim]")
-
-        stage_results = await run_staged_analysis(
-            backend=backend,
-            registry=tool_registry,
-            user_prompt=data_only_prompt,
-            system_prompt=system_prompt,
-            stage_specs=stage_specs,
-            timeout_per_stage=config.llm.timeout,
-            move_timeout=config.llm.move_timeout,
-            render_fn=_render,
-        )
+        display = AnalysisStatusDisplay(timeout=config.llm.timeout, console=console)
+        display.start()
+        try:
+            stage_results = await run_staged_analysis(
+                backend=backend,
+                registry=tool_registry,
+                user_prompt=data_only_prompt,
+                system_prompt=system_prompt,
+                stage_specs=stage_specs,
+                timeout_per_stage=config.llm.timeout,
+                move_timeout=config.llm.move_timeout,
+                status_display=display,
+            )
+        finally:
+            display.stop()
 
         rendered_parts: list[str] = []
-        for spec, text in zip(stage_specs, stage_results):
+        for i, (spec, sr) in enumerate(zip(stage_specs, stage_results)):
             console.rule(f"[bold cyan]{spec.name}[/bold cyan]")
-            rendered_parts.append(text)
+            rendered_parts.append(sr.text)
+            if sr.done_data:
+                print_token_summary(
+                    sr.done_data,
+                    stage_label=f"Stage {i + 1}/{len(stage_specs)}",
+                )
 
         return "\n\n".join(rendered_parts)
 
     try:
-        if deep:
-            return asyncio.run(_run_deep()) or None
-        else:
+        if ai_layers <= 1:
             return asyncio.run(_run_single()) or None
+        else:
+            return asyncio.run(_run_staged(ai_layers=ai_layers)) or None
     except Exception as e:
         logger.warning("AI analysis failed: %s", e)
         if verbose:
@@ -540,7 +545,7 @@ def run_analysis(
     quiet: bool = False,
     no_ai: bool = False,
     output_file: Path | None = None,
-    deep: bool = False,
+    ai_layers: int = 1,
 ) -> None:
     """Complete analysis pipeline: load → merge → rules → render → AI.
 
@@ -555,7 +560,7 @@ def run_analysis(
         quiet: Show only CRITICAL findings.
         no_ai: Skip AI-enhanced analysis.
         output_file: Write output to file instead of stdout.
-        deep: Use multi-stage deep analysis (profile mode only).
+        ai_layers: Number of AI analysis stages (1=single, 2=deep, 3=radical).
     """
     import sys
 
@@ -615,7 +620,7 @@ def run_analysis(
     if not no_ai:
         console.print()
         console.rule("[bold cyan]AI-Enhanced Analysis[/bold cyan]")
-        ai_text = try_ai_analysis(reports, findings_map, config, reader=reader, verbose=verbose, report_path=report_path, deep=deep)
+        ai_text = try_ai_analysis(reports, findings_map, config, reader=reader, verbose=verbose, report_path=report_path, ai_layers=ai_layers)
         if ai_text:
             console.print(Markdown(ai_text))
         else:

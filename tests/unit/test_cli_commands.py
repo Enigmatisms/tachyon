@@ -41,7 +41,7 @@ class TestCLICommands:
         """tachyon profile --help shows options."""
         result = runner.invoke(app, ["profile", "--help"])
         assert result.exit_code == 0
-        assert "--strategy" in result.output
+        assert "--deep" in result.output or "--radical" in result.output
 
     def test_serve_help(self, runner):
         """tachyon serve --help shows options."""

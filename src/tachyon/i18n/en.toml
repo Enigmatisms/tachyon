@@ -138,3 +138,18 @@ text = """The dominant bottleneck is **LATENCY**. Focus on:
 text = """Multiple bottleneck types detected. Provide a comprehensive analysis:
 - Identify the #1 priority optimization
 - For each finding, explain WHY and HOW to fix"""
+
+[scratch_board]
+context = "Key findings from previous stages:"
+stage1_hint = """
+**Scratch Board**: End your analysis with a `<scratch_board>` section containing:
+- Top-3 hotspots (kernel_id + bottleneck type + key metric values)
+- Unusual patterns needing source-level investigation"""
+stage2_hint = """
+**Scratch Board**: End with a `<scratch_board>` section containing:
+- Top-3 root causes (file:line + evidence: SPI, stall, SASS)
+- Optimization opportunities sorted by estimated impact"""
+
+[depth.hint]
+basic = "Tip: Try --deep for 2-layer analysis, or --radical for full 3-layer analysis."
+deep = "Tip: Try --radical for 3-layer analysis with aggressive NCU profiling."

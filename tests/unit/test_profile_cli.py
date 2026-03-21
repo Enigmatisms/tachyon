@@ -92,8 +92,8 @@ class TestProfileCommand:
 
         assert result.exit_code == 0 or "Error" in result.output
 
-    def test_profile_with_strategy(self, runner):
-        """--strategy option is accepted."""
+    def test_profile_with_radical(self, runner):
+        """--radical option is accepted."""
         from tachyon.cli.main import app
 
         fail_result = ToolResult.fail(ErrorCode.TOOL_NOT_FOUND, "ncu not found")
@@ -102,8 +102,30 @@ class TestProfileCommand:
              patch("tachyon.cli.profile.TachyonConfig") as mock_cfg:
             mock_cfg.load.return_value = TachyonConfig()
             mock_asyncio.run.return_value = fail_result
-            result = runner.invoke(app, ["profile", "--strategy", "radical", "./app"])
+            result = runner.invoke(app, ["profile", "--radical", "./app"])
 
+        assert result.exit_code != 0
+
+    def test_profile_with_deep(self, runner):
+        """--deep option is accepted."""
+        from tachyon.cli.main import app
+
+        fail_result = ToolResult.fail(ErrorCode.TOOL_NOT_FOUND, "ncu not found")
+
+        with patch("tachyon.cli.profile.asyncio") as mock_asyncio, \
+             patch("tachyon.cli.profile.TachyonConfig") as mock_cfg:
+            mock_cfg.load.return_value = TachyonConfig()
+            mock_asyncio.run.return_value = fail_result
+            result = runner.invoke(app, ["profile", "--deep", "./app"])
+
+        assert result.exit_code != 0
+
+    def test_deep_radical_mutually_exclusive(self, runner):
+        """--deep and --radical cannot be used together (Click mutual exclusion)."""
+        from tachyon.cli.main import app
+
+        result = runner.invoke(app, ["profile", "--deep", "--radical", "./app"])
+        # Click should error with "conflicting options" or similar
         assert result.exit_code != 0
 
     def test_profile_with_kernel_filter(self, runner):

@@ -28,9 +28,9 @@ def _mv(name: str, value: float, unit: str = "") -> MetricValue:
 
 
 def _make_config() -> TachyonConfig:
-    """Minimal TachyonConfig with conservative strategy."""
+    """Minimal TachyonConfig with basic depth."""
     cfg = TachyonConfig()
-    cfg.profiling.strategy = "conservative"
+    cfg.profiling.depth = "basic"
     return cfg
 
 

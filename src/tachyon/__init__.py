@@ -14,10 +14,11 @@ __version__ = "0.1.0"
 # Profiler (M4)
 # Config
 from tachyon.config.settings import TachyonConfig
-from tachyon.profiler.ncu_profiler import NcuProfiler, ProfilingStrategy
+from tachyon.profiler.ncu_profiler import AnalysisDepth, NcuProfiler, ProfilingStrategy
 from tachyon.profiler.tool_path import ToolPathResolver
 
 __all__ = [
+    "AnalysisDepth",
     "NcuProfiler",
     "ProfilingStrategy",
     "ToolPathResolver",

@@ -7,12 +7,15 @@ from unittest.mock import patch
 from rich.console import Console
 
 from tachyon.utils.progress import (
+    AnalysisStatusDisplay,
     NcuSpinner,
+    _format_time,
     print_error_panel,
     print_ncu_line,
     print_profile_summary,
     print_stage_header,
     print_stage_result,
+    print_token_summary,
 )
 
 
@@ -101,17 +104,17 @@ class TestPrintProfileSummary:
         output = _capture_output(
             print_profile_summary,
             executable="./app",
-            strategy="conservative",
+            depth="basic",
         )
         assert "./app" in output
-        assert "conservative" in output
+        assert "basic" in output
         assert "Two-stage" in output
 
     def test_summary_with_kernel_filter(self):
         output = _capture_output(
             print_profile_summary,
             executable="./app",
-            strategy="radical",
+            depth="radical",
             kernels=["matmul*"],
         )
         assert "matmul" in output
@@ -121,7 +124,7 @@ class TestPrintProfileSummary:
         output = _capture_output(
             print_profile_summary,
             executable="./app",
-            strategy="conservative",
+            depth="basic",
             ncu_set="full",
         )
         assert "full" in output
@@ -221,3 +224,139 @@ class TestNcuSpinner:
         spinner._stopped = False
         spinner.__del__()
         assert spinner._stopped is True
+
+
+class TestFormatTime:
+
+    def test_zero(self):
+        assert _format_time(0) == "0s"
+
+    def test_negative(self):
+        assert _format_time(-1) == "0s"
+
+    def test_seconds(self):
+        assert _format_time(5) == "5s"
+        assert _format_time(59) == "59s"
+
+    def test_minutes(self):
+        assert _format_time(60) == "1m0s"
+        assert _format_time(90) == "1m30s"
+        assert _format_time(3599) == "59m59s"
+
+    def test_hours(self):
+        assert _format_time(3600) == "1h0m"
+        assert _format_time(3661) == "1h1m"
+        assert _format_time(7384) == "2h3m"
+
+
+class TestAnalysisStatusDisplay:
+
+    def test_creation_defaults(self):
+        display = AnalysisStatusDisplay(timeout=300)
+        assert display._timeout == 300
+        assert display._current_status == "waiting for LLM"
+        assert display._prev_status is None
+        assert display._stage_label == ""
+
+    def test_set_stage(self):
+        display = AnalysisStatusDisplay()
+        display.set_stage(0, 3)
+        assert display._stage_label == "Stage 1/3"
+        display.set_stage(2, 3)
+        assert display._stage_label == "Stage 3/3"
+
+    def test_set_status_pushes_current_to_prev(self):
+        display = AnalysisStatusDisplay()
+        display.set_status("calling foo")
+        assert display._prev_status == "waiting for LLM"
+        assert display._current_status == "calling foo"
+
+    def test_set_status_no_change(self):
+        display = AnalysisStatusDisplay()
+        display.set_status("waiting for LLM")  # same as default
+        assert display._prev_status is None
+
+    def test_set_tool(self):
+        display = AnalysisStatusDisplay()
+        display.set_tool("get_kernel_summary")
+        assert display._current_status == "calling get_kernel_summary"
+
+    def test_set_synthesizing(self):
+        display = AnalysisStatusDisplay()
+        display.set_synthesizing()
+        assert display._current_status == "synthesizing..."
+
+    def test_status_sequence(self):
+        """Multiple status changes keep only the last prev."""
+        display = AnalysisStatusDisplay()
+        display.set_tool("tool_a")
+        assert display._prev_status == "waiting for LLM"
+        display.set_status("waiting for LLM")
+        assert display._prev_status == "calling tool_a"
+        display.set_tool("tool_b")
+        assert display._prev_status == "waiting for LLM"
+        assert display._current_status == "calling tool_b"
+
+    def test_start_stop_idempotent(self):
+        """start/stop don't crash and are idempotent."""
+        display = AnalysisStatusDisplay()
+        display.start()
+        display.stop()
+        display.stop()  # second stop is safe
+
+    def test_stop_without_start(self):
+        """stop() without start() doesn't crash."""
+        display = AnalysisStatusDisplay()
+        display.stop()
+
+    def test_del_cleanup(self):
+        display = AnalysisStatusDisplay()
+        display._stopped = False
+        display.__del__()
+        assert display._stopped is True
+
+
+class TestPrintTokenSummary:
+
+    def test_with_budget(self):
+        done_data = {
+            "turns": 5,
+            "tool_calls": 12,
+            "total_tokens": 15000,
+            "total_elapsed": 45.3,
+            "budget": 200000,
+            "budget_remaining": 150000,
+        }
+        output = _capture_output(print_token_summary, done_data)
+        assert "5 turns" in output
+        assert "12 tools" in output
+        assert "15,000 tokens" in output
+        assert "150,000/200,000" in output
+        assert "25% used" in output
+        assert "45.3s" in output
+
+    def test_without_budget(self):
+        done_data = {
+            "turns": 2,
+            "tool_calls": 3,
+            "total_tokens": 5000,
+            "total_elapsed": 10.0,
+        }
+        output = _capture_output(print_token_summary, done_data)
+        assert "2 turns" in output
+        assert "3 tools" in output
+        assert "5,000 tokens" in output
+        assert "10.0s" in output
+        assert "budget" not in output.lower()
+
+    def test_with_stage_label(self):
+        done_data = {"turns": 1, "tool_calls": 1, "total_tokens": 100, "total_elapsed": 5.0}
+        output = _capture_output(print_token_summary, done_data, stage_label="Stage 1/3")
+        assert "[Stage 1/3]" in output
+
+    def test_empty_data(self):
+        done_data = {}
+        output = _capture_output(print_token_summary, done_data)
+        assert "0 turns" in output
+        assert "0 tools" in output
+        assert "0 tokens" in output

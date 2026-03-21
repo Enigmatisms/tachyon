@@ -140,3 +140,18 @@ text = """主要瓶颈为 **延迟 (LATENCY)**，重点关注：
 text = """检测到多种瓶颈类型，提供综合分析：
 - 确定第一优先优化项
 - 对每个发现解释原因和修复方法"""
+
+[scratch_board]
+context = "前面阶段的关键发现："
+stage1_hint = """
+**Scratch Board**: 请在分析末尾附加一个 `<scratch_board>` 小节，包含：
+- Top-3 hotspot（kernel_id + 瓶颈类型 + 关键指标值）
+- 需要源码层面深入调查的异常模式"""
+stage2_hint = """
+**Scratch Board**: 请在末尾附加一个 `<scratch_board>` 小节，包含：
+- Top-3 根因（file:line + 证据：SPI、stall、SASS）
+- 按预期影响排序的优化机会"""
+
+[depth.hint]
+basic = "提示：尝试 --deep 进行 2 层分析，或 --radical 进行完整 3 层分析。"
+deep = "提示：尝试 --radical 进行 3 层分析，搭配激进 NCU 采集策略。"

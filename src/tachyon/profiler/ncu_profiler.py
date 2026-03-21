@@ -144,10 +144,26 @@ def _classify_error(stderr_text: str, returncode: int) -> tuple[_ErrorSource, st
 
 
 class ProfilingStrategy(str, Enum):
-    """Profiling aggressiveness level."""
+    """Internal profiling aggressiveness level."""
 
     CONSERVATIVE = "conservative"
     RADICAL = "radical"
+
+
+class AnalysisDepth(str, Enum):
+    """User-facing analysis depth — controls NCU aggressiveness + AI layer count."""
+
+    BASIC = "basic"
+    DEEP = "deep"
+    RADICAL = "radical"
+
+
+# Depth → (NCU ProfilingStrategy, AI layers)
+DEPTH_CONFIGS: dict[AnalysisDepth, tuple[ProfilingStrategy, int]] = {
+    AnalysisDepth.BASIC:   (ProfilingStrategy.CONSERVATIVE, 1),
+    AnalysisDepth.DEEP:    (ProfilingStrategy.CONSERVATIVE, 2),
+    AnalysisDepth.RADICAL: (ProfilingStrategy.RADICAL, 3),
+}
 
 
 @dataclass
@@ -236,7 +252,9 @@ class NcuProfiler:
 
         Returns .ncu-rep path for downstream parsing by NcuReportReader.
         """
-        strat = strategy or ProfilingStrategy(self._config.profiling.strategy)
+        strat = strategy or ProfilingStrategy(
+            DEPTH_CONFIGS[AnalysisDepth(self._config.profiling.depth)][0].value
+        )
         stage1_cfg, _ = STRATEGY_CONFIGS[strat]
 
         out_dir = output_dir or Path(tempfile.mkdtemp(prefix="tachyon_"))
@@ -277,7 +295,9 @@ class NcuProfiler:
             kernels: Kernel name regex patterns to profile (``--kernel-name``).
             strategy: Overrides config default.
         """
-        strat = strategy or ProfilingStrategy(self._config.profiling.strategy)
+        strat = strategy or ProfilingStrategy(
+            DEPTH_CONFIGS[AnalysisDepth(self._config.profiling.depth)][0].value
+        )
         _, stage2_cfg = STRATEGY_CONFIGS[strat]
 
         out_dir = output_dir or Path(tempfile.mkdtemp(prefix="tachyon_"))

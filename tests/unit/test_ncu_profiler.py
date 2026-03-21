@@ -19,6 +19,8 @@ import pytest
 from tachyon.config.settings import TachyonConfig
 from tachyon.errors.handler import ErrorCode
 from tachyon.profiler.ncu_profiler import (
+    AnalysisDepth,
+    DEPTH_CONFIGS,
     STRATEGY_CONFIGS,
     NcuProfiler,
     ProfilingResult,
@@ -34,12 +36,12 @@ FAKE_NCU = "/usr/local/cuda/bin/ncu"
 
 
 def _make_profiler(
-    strategy: str = "conservative",
+    depth: str = "basic",
     ncu_resolve_path: str = FAKE_NCU,
 ) -> tuple[NcuProfiler, MagicMock]:
     """Create an NcuProfiler with a mocked ToolPathResolver."""
     config = TachyonConfig()
-    config.profiling.strategy = strategy
+    config.profiling.depth = depth
     resolver = MagicMock(spec=ToolPathResolver)
     resolver.resolve.return_value = ncu_resolve_path
     profiler = NcuProfiler(config, resolver)
@@ -241,7 +243,7 @@ class TestNcuProfilerBuildCommand:
 
     def test_build_command_radical_stage2_with_kernels(self, tmp_path: Path) -> None:
         """Radical Stage 2 includes --set full, --section SourceCounters, --kernel-name filters."""
-        profiler, _ = _make_profiler(strategy="radical")
+        profiler, _ = _make_profiler(depth="radical")
         out_file = tmp_path / "stage2.ncu-rep"
 
         cmd = profiler._build_command(
@@ -530,7 +532,7 @@ class TestNcuProfilerRun:
     @patch("tachyon.profiler.ncu_profiler.subprocess.Popen")
     def test_profile_basic_strategy_override(self, mock_popen: MagicMock, tmp_path: Path) -> None:
         """Explicit strategy parameter overrides config default."""
-        profiler, _ = _make_profiler(strategy="conservative")
+        profiler, _ = _make_profiler(depth="basic")
         out_file = tmp_path / "stage1.ncu-rep"
         mock_popen.return_value = _mock_subprocess_success(out_file)
 
@@ -652,7 +654,7 @@ class TestNcuProfilerTargeted:
         self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Conservative profile_targeted uses 'detailed' metric set (stage2 config)."""
-        profiler, _ = _make_profiler(strategy="conservative")
+        profiler, _ = _make_profiler(depth="basic")
         out_file = tmp_path / "stage2.ncu-rep"
         mock_popen.return_value = _mock_subprocess_success(out_file)
 
@@ -669,7 +671,7 @@ class TestNcuProfilerTargeted:
         self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Radical strategy Stage 2 includes --section SourceCounters."""
-        profiler, _ = _make_profiler(strategy="radical")
+        profiler, _ = _make_profiler(depth="radical")
         out_file = tmp_path / "stage2.ncu-rep"
         mock_popen.return_value = _mock_subprocess_success(out_file)
 
@@ -725,7 +727,7 @@ class TestNcuProfilerTargeted:
         self, mock_popen: MagicMock, tmp_path: Path
     ) -> None:
         """Explicit strategy overrides config default in profile_targeted."""
-        profiler, _ = _make_profiler(strategy="conservative")
+        profiler, _ = _make_profiler(depth="basic")
         out_file = tmp_path / "stage2.ncu-rep"
         mock_popen.return_value = _mock_subprocess_success(out_file)
 
@@ -895,3 +897,51 @@ class TestEndToEndFlow:
             "./app", kernels=["k1"], output_dir=s2_dir
         )
         assert s2_result.success is True
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━ TestAnalysisDepth ━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestAnalysisDepth:
+    """Tests for the AnalysisDepth enum and DEPTH_CONFIGS mapping."""
+
+    def test_enum_values(self) -> None:
+        """AnalysisDepth has BASIC, DEEP, RADICAL with correct string values."""
+        assert AnalysisDepth.BASIC == "basic"
+        assert AnalysisDepth.DEEP == "deep"
+        assert AnalysisDepth.RADICAL == "radical"
+
+    def test_depth_from_string(self) -> None:
+        """AnalysisDepth can be constructed from string value."""
+        assert AnalysisDepth("basic") is AnalysisDepth.BASIC
+        assert AnalysisDepth("deep") is AnalysisDepth.DEEP
+        assert AnalysisDepth("radical") is AnalysisDepth.RADICAL
+
+    def test_depth_configs_complete(self) -> None:
+        """All three depths have mappings in DEPTH_CONFIGS."""
+        for depth in AnalysisDepth:
+            assert depth in DEPTH_CONFIGS
+            entry = DEPTH_CONFIGS[depth]
+            assert isinstance(entry, tuple)
+            assert len(entry) == 2
+            strategy, layers = entry
+            assert isinstance(strategy, ProfilingStrategy)
+            assert isinstance(layers, int)
+
+    def test_depth_configs_basic(self) -> None:
+        """BASIC maps to CONSERVATIVE + 1 AI layer."""
+        strategy, layers = DEPTH_CONFIGS[AnalysisDepth.BASIC]
+        assert strategy == ProfilingStrategy.CONSERVATIVE
+        assert layers == 1
+
+    def test_depth_configs_deep(self) -> None:
+        """DEEP maps to CONSERVATIVE + 2 AI layers."""
+        strategy, layers = DEPTH_CONFIGS[AnalysisDepth.DEEP]
+        assert strategy == ProfilingStrategy.CONSERVATIVE
+        assert layers == 2
+
+    def test_depth_configs_radical(self) -> None:
+        """RADICAL maps to RADICAL + 3 AI layers."""
+        strategy, layers = DEPTH_CONFIGS[AnalysisDepth.RADICAL]
+        assert strategy == ProfilingStrategy.RADICAL
+        assert layers == 3

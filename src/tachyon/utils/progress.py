@@ -338,6 +338,20 @@ class NcuSpinner:
             pass
 
 
+def _format_time(seconds: float) -> str:
+    """Format seconds into a compact human-readable string."""
+    if seconds <= 0:
+        return "0s"
+    t = int(seconds)
+    if t < 60:
+        return f"{t}s"
+    minutes, secs = divmod(t, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h{minutes}m"
+
+
 # ── Agent spinner (AI analysis) ────────────────────────────────────────
 
 
@@ -407,20 +421,6 @@ class AgentSpinner:
 
     # ── internal ──────────────────────────────────────────────────────
 
-    @staticmethod
-    def _format_time(seconds: float) -> str:
-        """Format seconds into a compact human-readable string."""
-        if seconds <= 0:
-            return "0s"
-        t = int(seconds)
-        if t < 60:
-            return f"{t}s"
-        minutes, secs = divmod(t, 60)
-        if minutes < 60:
-            return f"{minutes}m{secs}s"
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours}h{minutes}m"
-
     def __rich_console__(self, rconsole: Console, options: Any) -> Any:
         """Render the single-line status for Rich Live."""
         try:
@@ -436,8 +436,8 @@ class AgentSpinner:
                 self._spinner,
                 Text(self._status, style="dim"),
                 Text(
-                    f"{self._format_time(elapsed)} | "
-                    f"{self._format_time(remaining)} left",
+                    f"{_format_time(elapsed)} | "
+                    f"{_format_time(remaining)} left",
                     style="dim",
                 ),
             )
@@ -451,6 +451,158 @@ class AgentSpinner:
             self.stop()
         except Exception:
             pass
+
+
+# ── Analysis status display (compact, 2-line) ────────────────────────
+
+
+class AnalysisStatusDisplay:
+    """Compact live status for AI analysis — shows last 2 states.
+
+    Unlike ``AgentSpinner`` (single transient line for chat), this display
+    keeps the 2 most recent status lines visible so the user can see progress
+    without scrolling.  Used by ``tachyon profile`` / ``tachyon analyze``.
+
+    Visual::
+
+        ⠹ [Stage 1/3] calling get_kernel_summary     12s | 9m48s left
+          [Stage 1/3] waiting for LLM                   8s
+    """
+
+    def __init__(
+        self,
+        timeout: int = 600,
+        console: Console | None = None,
+    ) -> None:
+        self._timeout = timeout
+        self._console = console
+        self._start = time.monotonic()
+        self._current_status = "waiting for LLM"
+        self._prev_status: str | None = None
+        self._prev_time: float = 0.0
+        self._stage_label = ""
+        self._spinner = Spinner("dots", style="bold cyan")
+        self._live: Live | None = None
+        self._stopped = False
+
+    def set_stage(self, stage_idx: int, total: int) -> None:
+        """Set stage label, e.g. ``'Stage 1/3'``."""
+        self._stage_label = f"Stage {stage_idx + 1}/{total}"
+
+    def set_status(self, text: str) -> None:
+        """Update status, pushing current to prev."""
+        if self._current_status != text:
+            self._prev_status = self._current_status
+            self._prev_time = time.monotonic() - self._start
+            self._current_status = text
+
+    def set_tool(self, name: str) -> None:
+        self.set_status(f"calling {name}")
+
+    def set_synthesizing(self) -> None:
+        self.set_status("synthesizing...")
+
+    def start(self) -> None:
+        if self._stopped:
+            return
+        try:
+            c = self._console if self._console is not None else console
+            self._live = Live(
+                self,
+                console=c,
+                refresh_per_second=3,
+                transient=False,
+            )
+            self._live.start()
+        except Exception:
+            self._live = None
+            _log.debug("Rich Live unavailable for AnalysisStatusDisplay", exc_info=True)
+
+    def stop(self) -> None:
+        """Stop and clear the live display. Idempotent."""
+        if self._stopped:
+            return
+        self._stopped = True
+        if self._live is not None:
+            try:
+                self._live.update(Text(""))
+                self._live.stop()
+            except Exception:
+                _log.debug("Error stopping AnalysisStatusDisplay Live", exc_info=True)
+            self._live = None
+
+    def __rich_console__(self, rconsole: Console, options: Any) -> Any:
+        """Render the 2-line status for Rich Live."""
+        try:
+            elapsed = time.monotonic() - self._start
+            remaining = max(0, self._timeout - elapsed)
+
+            grid = Table.grid(padding=(0, 1))
+            grid.add_column(width=2)   # spinner / indent
+            grid.add_column(ratio=1)   # status text
+            grid.add_column(justify="right")  # timer
+
+            # Row 1: current status with spinner
+            label1 = f"[{self._stage_label}] " if self._stage_label else ""
+            grid.add_row(
+                self._spinner,
+                Text(f"{label1}{self._current_status}", style="dim"),
+                Text(
+                    f"{_format_time(elapsed)} | {_format_time(remaining)} left",
+                    style="dim",
+                ),
+            )
+
+            # Row 2: previous status (dimmed, no spinner)
+            if self._prev_status is not None:
+                label2 = f"[{self._stage_label}] " if self._stage_label else ""
+                prev_elapsed = self._prev_time
+                grid.add_row(
+                    "",
+                    Text(f"  {label2}{self._prev_status}", style="dim"),
+                    Text(f"{_format_time(prev_elapsed)}", style="dim"),
+                )
+
+            yield grid
+        except Exception:
+            elapsed = time.monotonic() - self._start
+            yield Text(f"  {self._current_status}  [{elapsed:.0f}s]")
+
+    def __del__(self) -> None:
+        try:
+            self.stop()
+        except Exception:
+            pass
+
+
+# ── Token usage summary ──────────────────────────────────────────────
+
+
+def print_token_summary(
+    done_data: dict,
+    stage_label: str = "",
+) -> None:
+    """Print token usage and budget info after analysis completes.
+
+    Args:
+        done_data: Dict from AgentEvent(type="done").data.
+        stage_label: Optional label like ``"Stage 1/3"``.
+    """
+    turns = done_data.get("turns", 0)
+    n_tools = done_data.get("tool_calls", 0)
+    tokens = done_data.get("total_tokens", 0)
+    total_elapsed = done_data.get("total_elapsed", 0)
+    budget = done_data.get("budget", 0)
+    budget_remaining = done_data.get("budget_remaining", 0)
+
+    parts = [f"{turns} turns, {n_tools} tools, {tokens:,} tokens"]
+    if budget > 0:
+        pct = round((budget - budget_remaining) / budget * 100, 1)
+        parts.append(f"ctx {budget_remaining:,}/{budget:,} ({pct:.0f}% used)")
+    parts.append(f"{total_elapsed:.1f}s")
+
+    prefix = f"  [{stage_label}] " if stage_label else "  "
+    console.print(f"[dim]{prefix}Done: {', '.join(parts)}[/dim]")
 
 
 # ── Error panel ────────────────────────────────────────────────────────
@@ -469,7 +621,7 @@ def print_error_panel(title: str, message: str, suggestion: str | None = None) -
 
 def print_profile_summary(
     executable: str,
-    strategy: str,
+    depth: str,
     kernels: list[str] | None = None,
     ncu_set: str | None = None,
     ncu_metrics: str | None = None,
@@ -486,7 +638,7 @@ def print_profile_summary(
     table.add_column("Value")
 
     table.add_row("Executable", executable)
-    table.add_row("Strategy", strategy)
+    table.add_row("Depth", depth)
     if ncu_set:
         table.add_row("Metric Set", f"{ncu_set} (override)")
     if ncu_metrics:
@@ -503,3 +655,22 @@ def print_profile_summary(
 
     console.print(table)
     console.print()
+
+
+# ── Depth hint ───────────────────────────────────────────────────────
+
+
+def print_depth_hint(depth: Any) -> None:
+    """Print a hint suggesting deeper analysis modes."""
+    from tachyon.profiler.ncu_profiler import AnalysisDepth
+
+    if depth == AnalysisDepth.BASIC:
+        console.print(
+            "\n[dim]Tip: Try [bold]--deep[/bold] for 2-layer analysis, "
+            "or [bold]--radical[/bold] for full 3-layer analysis.[/dim]"
+        )
+    elif depth == AnalysisDepth.DEEP:
+        console.print(
+            "\n[dim]Tip: Try [bold]--radical[/bold] for 3-layer analysis "
+            "with aggressive NCU profiling.[/dim]"
+        )

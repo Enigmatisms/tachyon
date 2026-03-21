@@ -39,8 +39,8 @@ class LLMConfig:
 
 @dataclass
 class ProfilingConfig:
-    """Profiling strategy configuration."""
-    strategy: str = "conservative"
+    """Profiling depth configuration."""
+    depth: str = "basic"  # "basic", "deep", "radical"
 
 
 @dataclass
@@ -112,7 +112,8 @@ class TachyonConfig:
             "TACHYON_API_KEY_ENV": ("llm", "api_key_env"),
             "TACHYON_BASE_URL": ("llm", "base_url"),
             "TACHYON_LANG": ("output", "lang"),
-            "TACHYON_STRATEGY": ("profiling", "strategy"),
+            "TACHYON_DEPTH": ("profiling", "depth"),
+            "TACHYON_STRATEGY": ("profiling", "depth"),  # backward compat
             "TACHYON_NCU_REPORT_PATH": ("tools", "ncu_report_path"),
         }
         for env_var, (section, attr) in env_map.items():
@@ -147,7 +148,7 @@ class TachyonConfig:
             "model": ("llm", "model"),
             "lang": ("output", "lang"),
             "format": ("output", "format"),
-            "strategy": ("profiling", "strategy"),
+            "depth": ("profiling", "depth"),
         }
         for key, (section, attr) in cli_map.items():
             if val := kwargs.get(key):
