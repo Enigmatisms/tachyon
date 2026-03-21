@@ -21,6 +21,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 
 from tachyon.cli.main import app
@@ -280,7 +281,7 @@ async def _chat_loop(
         build_lean_system_prompt,
         build_system_prompt,
     )
-    from tachyon.utils.progress import AgentSpinner
+    from tachyon.utils.progress import ChatStatusDisplay
 
     kernel_context = build_kernel_context(kernels)
     system_prompt = build_system_prompt(tool_registry, kernel_context)
@@ -311,6 +312,8 @@ async def _chat_loop(
         ds.specs = build_stage_prompts(mode="chat")
         console.print("[cyan]Deep analysis mode[/cyan]: Stage 1/2 — Metric Analysis")
         console.print("[dim]Type /next to jump to next stage, /help for commands.[/dim]")
+
+    _collapsed = True  # Ctrl+O toggle state, persists across turns (default collapsed)
 
     while True:
         try:
@@ -353,8 +356,8 @@ async def _chat_loop(
         # Run agent loop — show tool calls in real time for transparency
         text_buffer = []
         tool_calls_made: list[str] = []
-        spinner = AgentSpinner(timeout=timeout, console=console)
-        spinner.start()
+        display = ChatStatusDisplay(timeout=timeout, console=console, collapsed=_collapsed)
+        display.start()
         try:
             loop_kwargs = dict(
                 backend=backend,
@@ -372,27 +375,31 @@ async def _chat_loop(
 
             async for event in run_agent_loop(**loop_kwargs):
                 if event.type == "text":
-                    spinner.set_synthesizing()
+                    display.set_synthesizing()
                     text_buffer.append(event.content or "")
                 elif event.type == "thinking":
                     if event.content:
                         console.print(f"  [dim italic]{event.content[:120]}[/dim italic]")
                 elif event.type == "tool_call":
                     name = event.data["name"] if event.data else "?"
-                    spinner.set_tool(name)
+                    display.set_tool(name)
                     args = event.data.get("arguments", {}) if event.data else {}
                     tool_calls_made.append(name)
                     args_short = ", ".join(
                         f"{k}={v}" for k, v in list(args.items())[:3]
                     )
-                    console.print(f"  [cyan]▶ {name}[/cyan]({args_short})")
+                    display.add_tool_entry(
+                        f"  [cyan]\u25b6 {name}[/cyan]({escape(args_short)})"
+                    )
                 elif event.type == "tool_result":
-                    spinner.set_status("waiting for LLM")
+                    display.set_status("waiting for LLM")
                     if event.data:
                         summary = event.data.get("summary", "")
-                        ok = "✓" if event.data.get("success") else "✗"
+                        ok = "\u2713" if event.data.get("success") else "\u2717"
                         t = event.data.get("elapsed", 0)
-                        console.print(f"    [dim]{ok} {summary[:140]}  ({t:.2f}s)[/dim]")
+                        display.add_tool_entry(
+                            f"    [dim]{ok} {escape(summary[:140])}  ({t:.2f}s)[/dim]"
+                        )
                 elif event.type == "system":
                     if event.data and "turn" in event.data:
                         # Per-turn timing
@@ -400,7 +407,9 @@ async def _chat_loop(
                     elif event.content:
                         console.print(f"  [yellow]{event.content}[/yellow]")
                 elif event.type == "done":
-                    spinner.stop()
+                    _collapsed = display.collapsed  # persist toggle state
+                    display.stop()
+                    display.flush()  # print tool entries to scrollback
                     if event.data:
                         turns = event.data.get("turns", 0)
                         n_tools = event.data.get("tool_calls", 0)
@@ -426,7 +435,10 @@ async def _chat_loop(
                             f"{tokens:,} tokens{budget_str}, {total_elapsed:.1f}s[/dim]"
                         )
         finally:
-            spinner.stop()
+            if not display.stopped:
+                _collapsed = display.collapsed
+            display.stop()
+            display.flush()
 
         # Render collected text as markdown
         full_text = "".join(text_buffer)

@@ -5,11 +5,14 @@ from io import StringIO
 from unittest.mock import patch
 
 from rich.console import Console
+from rich.text import Text
 
 from tachyon.utils.progress import (
     AnalysisStatusDisplay,
+    ChatStatusDisplay,
     NcuSpinner,
     _format_time,
+    _start_key_reader,
     print_error_panel,
     print_ncu_line,
     print_profile_summary,
@@ -360,3 +363,180 @@ class TestPrintTokenSummary:
         assert "0 turns" in output
         assert "0 tools" in output
         assert "0 tokens" in output
+
+
+class TestChatStatusDisplay:
+
+    def test_default_expanded(self):
+        d = ChatStatusDisplay(timeout=300)
+        assert d.collapsed is False
+
+    def test_initial_collapsed(self):
+        d = ChatStatusDisplay(timeout=300, collapsed=True)
+        assert d.collapsed is True
+
+    def test_toggle(self):
+        d = ChatStatusDisplay()
+        d.toggle()
+        assert d.collapsed is True
+        d.toggle()
+        assert d.collapsed is False
+
+    def test_add_tool_entry_buffers_parsed_text(self):
+        d = ChatStatusDisplay()
+        d.add_tool_entry("[cyan]\u25b6 tool1[/cyan]")
+        assert len(d._tool_entries) == 1
+        assert isinstance(d._tool_entries[0], Text)
+        assert len(d._tool_entries[0].spans) > 0  # markup was parsed
+
+    def test_add_tool_entry_preserves_content(self):
+        d = ChatStatusDisplay()
+        d.add_tool_entry("[cyan]\u25b6 tool1[/cyan]")
+        assert "\u25b6 tool1" in d._tool_entries[0].plain
+
+    def test_tool_count_uses_total_entries(self):
+        """Tool count reflects all entries, not just 'suppressed' ones."""
+        d = ChatStatusDisplay(collapsed=False)
+        d.add_tool_entry("[cyan]\u25b6 tool1[/cyan]")
+        d.add_tool_entry("[dim]\u2713 result[/dim]")
+        assert len(d._tool_entries) == 2
+
+    def test_set_status_pushes_prev(self):
+        """prev_status is always tracked (used by collapsed rendering)."""
+        d = ChatStatusDisplay()
+        d.set_status("calling foo")
+        assert d._prev_status == "waiting for LLM"
+        d.set_status("calling bar")
+        assert d._prev_status == "calling foo"
+
+    def test_set_status_same_no_prev_push(self):
+        d = ChatStatusDisplay()
+        d.set_status("waiting for LLM")
+        assert d._prev_status is None
+
+    def test_set_tool(self):
+        d = ChatStatusDisplay()
+        d.set_tool("get_kernel_summary")
+        assert d._current_status == "calling get_kernel_summary"
+
+    def test_set_synthesizing(self):
+        d = ChatStatusDisplay()
+        d.set_synthesizing()
+        assert d._current_status == "synthesizing..."
+
+    def test_start_stop_idempotent(self):
+        d = ChatStatusDisplay()
+        d.start()
+        d.stop()
+        d.stop()
+        assert d.stopped is True
+
+    def test_stop_without_start(self):
+        d = ChatStatusDisplay()
+        d.stop()
+        assert d.stopped is True
+
+    def test_stopped_property(self):
+        d = ChatStatusDisplay()
+        assert d.stopped is False
+        d.stop()
+        assert d.stopped is True
+
+    def test_flush_prints_entries(self):
+        """flush() emits all buffered entries as permanent output."""
+        d = ChatStatusDisplay()
+        d.add_tool_entry("[cyan]\u25b6 tool1[/cyan]")
+        d.add_tool_entry("[dim]\u2713 result[/dim]")
+        d.stop()
+        buf = StringIO()
+        test_console = Console(file=buf, force_terminal=True, width=120, highlight=False)
+        d._console = test_console
+        d._flushed = False
+        d.flush()
+        output = buf.getvalue()
+        assert "tool1" in output
+        assert "result" in output
+
+    def test_flush_skips_in_collapsed(self):
+        """flush() respects collapsed state — no output when collapsed."""
+        d = ChatStatusDisplay(collapsed=True)
+        d.add_tool_entry("[cyan]\u25b6 tool1[/cyan]")
+        d.stop()
+        buf = StringIO()
+        test_console = Console(file=buf, force_terminal=True, width=120, highlight=False)
+        d._console = test_console
+        d._flushed = False
+        d.flush()
+        assert buf.getvalue() == ""
+
+    def test_flush_idempotent(self):
+        d = ChatStatusDisplay()
+        d.add_tool_entry("[cyan]\u25b6 tool1[/cyan]")
+        d.stop()
+        d.flush()
+        d.flush()
+        assert d._flushed is True
+
+    def test_flush_empty(self):
+        d = ChatStatusDisplay()
+        d.stop()
+        d.flush()
+        assert d._flushed is True
+
+    def test_add_tool_entry_no_direct_print(self):
+        """add_tool_entry never prints directly — only Live renders them."""
+        d = ChatStatusDisplay()
+        buf = StringIO()
+        test_console = Console(file=buf, force_terminal=True, width=120, highlight=False)
+        d._console = test_console
+        d.add_tool_entry("[cyan]\u25b6 tool1[/cyan]")
+        assert buf.getvalue() == ""
+
+    def test_render_order_expanded(self):
+        """Grid (spinner) is yielded first, tool entries after."""
+        from rich.table import Table
+
+        d = ChatStatusDisplay()
+        d.add_tool_entry("[dim]entry1[/dim]")
+        items = list(d.__rich_console__(None, None))
+        assert len(items) == 2
+        assert isinstance(items[0], Table)   # grid at top
+        assert isinstance(items[1], Text)    # tool entry below
+
+    def test_render_order_collapsed(self):
+        """Collapsed mode yields only the grid, no tool entries."""
+        from rich.table import Table
+
+        d = ChatStatusDisplay(collapsed=True)
+        d.add_tool_entry("[dim]entry1[/dim]")
+        d.add_tool_entry("[dim]entry2[/dim]")
+        items = list(d.__rich_console__(None, None))
+        assert len(items) == 1
+        assert isinstance(items[0], Table)
+
+    def test_markup_with_brackets(self):
+        """User data containing [ ] doesn't crash Text.from_markup."""
+        d = ChatStatusDisplay()
+        # This would crash without Text.escape in the caller
+        d.add_tool_entry("[cyan]\u25b6 tool[/cyan](path=[tmp]/file)")
+        assert len(d._tool_entries) == 1
+
+    def test_del_cleanup(self):
+        d = ChatStatusDisplay()
+        d._stopped = False
+        d.__del__()
+        assert d.stopped is True
+
+
+class TestStartKeyReader:
+
+    def test_non_tty_returns_none(self):
+        with patch("sys.stdin.isatty", return_value=False):
+            result = _start_key_reader(lambda: None)
+            assert result is None
+
+    def test_windows_returns_none(self):
+        with patch("sys.platform", "win32"):
+            with patch("sys.stdin.isatty", return_value=True):
+                result = _start_key_reader(lambda: None)
+                assert result is None

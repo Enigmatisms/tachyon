@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import logging
 import re
+import select
 import sys
+import termios
 import threading
 import time
+import tty
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any, Callable, Generator
 
 from rich.console import Console
 from rich.live import Live
@@ -445,6 +448,237 @@ class AgentSpinner:
         except Exception:
             elapsed = time.monotonic() - self._start
             yield Text(f"  {self._status}  [{elapsed:.0f}s]")
+
+    def __del__(self) -> None:
+        try:
+            self.stop()
+        except Exception:
+            pass
+
+
+def _start_key_reader(toggle_fn: Callable[[], None]) -> threading.Event | None:
+    """Start a background thread to capture Ctrl+O (\\x0f).
+
+    Returns a stop_event that the caller should ``.set()`` when done, or
+    ``None`` when keyboard capture is not possible (non-TTY / Windows).
+
+    ``tty.setcbreak`` clears ECHO and ICANON but **preserves ISIG**, so
+    Ctrl+C still delivers SIGINT.
+    """
+    if not sys.stdin.isatty() or sys.platform == "win32":
+        return None
+
+    fd = sys.stdin.fileno()
+    old_attrs = termios.tcgetattr(fd)
+    stop_event = threading.Event()
+
+    def _reader() -> None:
+        try:
+            tty.setcbreak(fd)
+            while not stop_event.is_set():
+                r, _, _ = select.select([fd], [], [], 0.15)
+                if r:
+                    ch = sys.stdin.read(1)
+                    if not ch:  # EOF
+                        break
+                    if ch == "\x0f":  # Ctrl+O
+                        toggle_fn()
+        except OSError:
+            pass
+        finally:
+            # Flush → restore → flush.
+            # 1st flush (cbreak): clear CPR responses queued while thread
+            # was running (Rich Live sends \e[6n, terminal answers \e[N;NR).
+            # restore: put terminal back in cooked mode.
+            # 2nd flush (cooked): catch any late-arriving responses that
+            # landed between the 1st flush and the restore.
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            except OSError:
+                pass
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            except OSError:
+                pass
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            except OSError:
+                pass
+
+    t = threading.Thread(target=_reader, name="ctrl-o-reader")
+    # Non-daemon: guarantees the finally block above runs on exit,
+    # restoring terminal attributes even on Ctrl+C / exception.
+    t.start()
+    return stop_event
+
+
+class ChatStatusDisplay:
+    """Agent loop status with Ctrl+O toggle: expanded ↔ collapsed.
+
+    All tool entries are rendered **inside** a single Rich Live display, so
+    toggling is instant — no scrollback residue, no markup corruption, and
+    the Ctrl+O hint never persists after the display stops.
+
+    - Expanded: spinner row + toggle hint + all tool entries
+    - Collapsed: compact 2-line status + tool count, entries hidden
+
+    ``thinking`` / ``system`` events bypass this object and use
+    ``console.print()`` directly (Rich Live prints them above its area).
+    """
+
+    def __init__(
+        self,
+        timeout: int = 600,
+        console: Console | None = None,
+        collapsed: bool = False,
+    ) -> None:
+        self._timeout = timeout
+        self._console = console
+        self._collapsed = collapsed
+        self._start = time.monotonic()
+        self._current_status = "waiting for LLM"
+        self._prev_status: str | None = None
+        self._prev_time: float = 0.0
+        self._tool_entries: list[Text] = []  # pre-parsed Text objects
+        self._spinner = Spinner("dots", style="bold cyan")
+        self._live: Live | None = None
+        self._stopped = False
+        self._key_stop: threading.Event | None = None
+        self._flushed = False
+
+    @property
+    def collapsed(self) -> bool:
+        return self._collapsed
+
+    @property
+    def stopped(self) -> bool:
+        return self._stopped
+
+    def toggle(self) -> None:
+        self._collapsed = not self._collapsed
+
+    def add_tool_entry(self, markup: str) -> None:
+        """Buffer a tool entry (Rich markup string).
+
+        Parsed once into a ``Text`` object and rendered inside Live when
+        expanded.  Never printed directly — no scrollback leakage.
+        """
+        self._tool_entries.append(Text.from_markup(markup))
+
+    # ── status ──
+
+    def set_status(self, text: str) -> None:
+        if self._current_status != text:
+            self._prev_status = self._current_status
+            self._prev_time = time.monotonic() - self._start
+        self._current_status = text
+
+    def set_tool(self, name: str) -> None:
+        self.set_status(f"calling {name}")
+
+    def set_synthesizing(self) -> None:
+        self.set_status("synthesizing...")
+
+    # ── lifecycle ──
+
+    def start(self) -> None:
+        c = self._console or console
+        self._start = time.monotonic()
+        try:
+            self._live = Live(
+                self, console=c, refresh_per_second=3, transient=True,
+            )
+            self._live.start()
+        except Exception:
+            self._live = None
+            _log.debug("Rich Live unavailable for ChatStatusDisplay", exc_info=True)
+        self._key_stop = _start_key_reader(self.toggle)
+
+    def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+        # Stop Live FIRST — its cleanup may send DSR queries (\e[6n).
+        # The key reader thread (still running in cbreak mode) will
+        # consume the terminal's CPR responses before we signal it to stop.
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:
+                _log.debug("Error stopping ChatStatusDisplay", exc_info=True)
+            self._live = None
+        # Then signal key reader — its finally block flushes + restores.
+        if self._key_stop is not None:
+            self._key_stop.set()
+            self._key_stop = None
+
+    def flush(self) -> None:
+        """Print tool entries to permanent output (call after stop).
+
+        Respects the user's toggle state: collapsed = no output,
+        expanded = full tool log.  Idempotent.
+        """
+        if self._flushed:
+            return
+        self._flushed = True
+        if self._collapsed:
+            return
+        c = self._console or console
+        for entry in self._tool_entries:
+            c.print(entry)
+
+    # ── rendering ──
+
+    def __rich_console__(self, rconsole: Console, options: Any) -> Any:
+        try:
+            elapsed = time.monotonic() - self._start
+            remaining = max(0, self._timeout - elapsed)
+
+            grid = Table.grid(padding=(0, 1))
+            grid.add_column(width=2)
+            grid.add_column(ratio=1)
+            grid.add_column(justify="right")
+
+            if self._collapsed:
+                status = self._current_status
+                n = len(self._tool_entries)
+                if n:
+                    status += f"  ({n} tool{'s' if n != 1 else ''})"
+                grid.add_row(
+                    self._spinner,
+                    Text(status, style="dim"),
+                    Text(
+                        f"{_format_time(elapsed)} | {_format_time(remaining)} left",
+                        style="dim",
+                    ),
+                )
+                if self._prev_status is not None:
+                    grid.add_row(
+                        "",
+                        Text(f"  {self._prev_status}", style="dim"),
+                        Text(_format_time(self._prev_time), style="dim"),
+                    )
+                grid.add_row("", Text("[Ctrl+O] expand", style="bold dim"), "")
+            else:
+                grid.add_row(
+                    self._spinner,
+                    Text(self._current_status, style="dim"),
+                    Text(
+                        f"{_format_time(elapsed)} | {_format_time(remaining)} left",
+                        style="dim",
+                    ),
+                )
+                grid.add_row("", Text("[Ctrl+O] collapse", style="bold dim"), "")
+
+            # Grid (spinner) first → rendered at top of Live area.
+            # Tool entries below, only in expanded mode.
+            yield grid
+            if not self._collapsed:
+                for entry in self._tool_entries:
+                    yield entry
+        except Exception:
+            elapsed = time.monotonic() - self._start
+            yield Text(f"  {self._current_status}  [{elapsed:.0f}s]")
 
     def __del__(self) -> None:
         try:
