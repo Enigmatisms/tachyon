@@ -4,9 +4,9 @@
 
 **AI empowered CUDA kernel profiler**
 
-Tachyon `/ˈtakēˌän/` (迅子，物理上一种只存在于理论上的速度快于光速的粒子) 是一个同时支持大模型 Agent 与传统基于规则的 CUDA kernel 性能分析工具。与现有的开源工具不同，本项目尝试将 NCU 指标 与 CUDA 源码、以及底层指令（如 PTX 或 SASS）这条路径打通，使得性能分析不止停留于报告指标的分析上，更能通过指令级分析回溯到源码层。这就类似迅子快于光速时，其飞行时逆着时间回溯的。我们希望优化结果速度极快（比目前你手动优化的 speed of light 快），并且有回溯能力。
+Tachyon `/ˈtakēˌän/` (迅子，物理上一种只存在于理论上的速度快于光速的粒子) 是一个 CUDA kernel 性能分析与自动优化工具。它结合了大模型 Agent 与传统规则分析，将 NCU 指标、CUDA 源码和底层指令（PTX/SASS）打通，使性能分析不止停留于聚合指标，更能通过指令级分析回溯到源码行。除了分析能力，**evolve** 模式实现了自动优化功能：Agent 读取 profiling 数据，自动编辑源码，编译、重新 profiling，迭代直到收敛——无需手动调参。
 
-本工具完全集成到 Python 中，支持端到端（类似 ncu，直接在 `tachyon` 后运行可执行文件）分析，也支持对你手动导出的 ncu 报告进行分析。对多种不同的 Agent Vendor 进行了集成。
+本工具完全集成在 Python 中，支持端到端 profiling（类似 ncu，直接运行可执行文件）、AI 交互式分析，以及全自动迭代优化。支持多种 LLM 后端。
 
 ## 特性
 
@@ -14,6 +14,7 @@ Tachyon `/ˈtakēˌän/` (迅子，物理上一种只存在于理论上的速度
 - **两阶段智能 Profiling**: 快速扫描找出最热的 Top-K kernel，再对它们做深度采集
 - **规则引擎 + AI Agent**: 7 个内置分析器 (roofline, memory, occupancy, warp stall, ...) 输出结构化结果；LLM Agent 带 9 个专用工具，支持交互式追问
 - **Profile Diff**: 对比两份 `.ncu-rep` 报告，高亮性能回退
+- **Evolve 模式**: 自动迭代优化 — LLM Agent 读取 NCU profiling 数据，编辑 CUDA 源码，编译、重新 profiling，逐轮接受或回退。不再需要手动调参循环
 - **MCP Server**: 通过 MCP 协议 (stdio) 与 Claude Code / Ducc 无缝集成
 
 ## 快速开始
@@ -41,6 +42,7 @@ tachyon analyze report.ncu-rep
 tachyon chat report.ncu-rep --model claude-sonnet-4-20250514
 tachyon profile ./my_app --strategy radical
 tachyon diff before.ncu-rep after.ncu-rep
+tachyon evolve ./my_app --build "make -j8" --max-iterations 10
 tachyon serve --mcp --report report.ncu-rep
 ```
 
@@ -52,6 +54,7 @@ tachyon serve --mcp --report report.ncu-rep
 | `tachyon chat` | AI 交互式分析，9 个专用工具 |
 | `tachyon profile` | 端到端: profile CUDA 程序 → 自动分析 |
 | `tachyon diff` | 对比两份报告，标记性能变化 |
+| `tachyon evolve` | LLM Agent 自动迭代优化 kernel 性能 |
 | `tachyon serve` | 启动 MCP server，给外部 agent 调用 |
 
 `tachyon <command> --help` 看完整选项。详见 [CLI 命令参考](docs/cli-reference.md)。
@@ -171,6 +174,7 @@ src/tachyon/
 ├── correlator/    三路映射引擎 (指标 <-> 源码 <-> SASS)
 ├── reader/        NCU .ncu-rep 报告解析
 ├── profiler/      两阶段智能 profiling, 工具路径发现
+├── evolve/        迭代优化编排器, 工具, persona
 ├── models/        核心数据模型 (KernelReport, Finding, OptTree, ...)
 ├── config/        TOML 配置 + 分层覆盖
 ├── report/        输出渲染 (terminal, markdown)
@@ -194,19 +198,12 @@ src/tachyon/
 | [配置说明](docs/configuration.md) | config.toml 各项配置、环境变量、优先级 |
 | [SDK 使用指南](docs/sdk-guide.md) | Python SDK 接口、常见用法、API 文档 |
 | [多 LLM 后端与 Ducc 集成](docs/multi-vendor-integration.md) | LLM 切换、Ducc MCP 集成、自定义 Provider |
+| [Evolve 使用指南](docs/evolve-guide.md) | 自动迭代优化: 用法、配置、实际案例 |
 
 
 ## 实际效果 [WIP]
 
-使用 Tachyon 对 [`cuda-pt` (my CUDA path tracing renderer)](https://github.com/Enigmatisms/cuda-pt) 进行 profiling。如下结果展示了使用 `tachyon profile` (端到端模式) 时的部分输出，使用的 Agent API 服务由 MINIMAX-M2.5 提供。下面是部分结果的截图：
-
-![1.png](./assets/1.png)
-
-![2.png](./assets/2.png)
-
-![3.png](./assets/3.png)
-
-![4.png](./assets/4.png)
+本部分见: [效果展示](assets/README.md)
 
 ## License
 
