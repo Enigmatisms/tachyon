@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -30,6 +31,7 @@ from tachyon.llm.backend import Message, Role
 
 if TYPE_CHECKING:
     from tachyon.analyzers.base import AnalyzerRegistry
+    from tachyon.chat.export import ChatHistory
     from tachyon.llm.backend import LLMBackend
     from tachyon.tools.context import SessionContext
     from tachyon.tools.registry import ToolRegistry
@@ -94,6 +96,52 @@ class _DeepSession:
         if self.prefer_lang:
             overrides["prefer_lang"] = self.prefer_lang
         return overrides
+
+
+@dataclass
+class _EvolveState:
+    """Encapsulates evolve mode state for chat integration."""
+
+    active: bool = False
+    ctx: Any = None              # EvolveContext
+    tool_registry: ToolRegistry | None = None
+    original_registry: ToolRegistry | None = None
+    original_system_prompt: str | None = None
+    original_lean_prompt: str | None = None
+    evolve_system_prompt: str | None = None  # C3: evolve-specific prompt
+
+    def activate(
+        self,
+        tool_registry: ToolRegistry,
+        evolve_tool_registry: ToolRegistry,
+        evolve_ctx: Any,
+        system_prompt: str,
+        lean_prompt: str,
+        evolve_system_prompt: str | None = None,
+    ) -> None:
+        """Enter evolve mode: swap tool registry and system prompt."""
+        self.active = True
+        self.original_registry = tool_registry
+        self.original_system_prompt = system_prompt
+        self.original_lean_prompt = lean_prompt
+        self.tool_registry = evolve_tool_registry
+        self.ctx = evolve_ctx
+        self.evolve_system_prompt = evolve_system_prompt
+
+    def deactivate(self) -> tuple[ToolRegistry, str, str | None]:
+        """Exit evolve mode: restore original tools and prompt."""
+        self.active = False
+        return (
+            self.original_registry,
+            self.original_system_prompt,
+            self.original_lean_prompt,
+        )
+
+    @property
+    def status_summary(self) -> dict:
+        if self.ctx is None:
+            return {"active": False}
+        return self.ctx.evolve.get_status_summary()
 
 
 @app.command()
@@ -262,6 +310,7 @@ def chat(
         backend, tool_registry, kernels, verbose,
         config.llm.timeout, config.llm.move_timeout,
         deep=deep,
+        model_info=f"{config.llm.provider}/{config.llm.model}",
     ))
 
 
@@ -273,6 +322,7 @@ async def _chat_loop(
     timeout: int = 600,
     move_timeout: int = 120,
     deep: bool = False,
+    model_info: str = "",
 ) -> None:
     """Main interactive chat loop."""
     from tachyon.agent.loop import run_agent_loop
@@ -280,6 +330,12 @@ async def _chat_loop(
         build_kernel_context,
         build_lean_system_prompt,
         build_system_prompt,
+    )
+    from tachyon.chat.export import (
+        ChatHistory,
+        ToolCallRecord,
+        TurnRecord,
+        UsageRecord,
     )
     from tachyon.utils.progress import ChatStatusDisplay
 
@@ -303,6 +359,7 @@ async def _chat_loop(
 
     history = []
     total_tokens = 0
+    history_records = ChatHistory(model_info=model_info)
     prompt_session: PromptSession[str] = PromptSession()
 
     # Deep mode state
@@ -312,6 +369,9 @@ async def _chat_loop(
         ds.specs = build_stage_prompts(mode="chat")
         console.print("[cyan]Deep analysis mode[/cyan]: Stage 1/2 — Metric Analysis")
         console.print("[dim]Type /next to jump to next stage, /help for commands.[/dim]")
+
+    # Evolve mode state
+    es = _EvolveState()
 
     _collapsed = True  # Ctrl+O toggle state, persists across turns (default collapsed)
 
@@ -331,6 +391,7 @@ async def _chat_loop(
         if user_input.startswith("/"):
             cmd_result = _handle_command(
                 user_input, kernels, tool_registry, total_tokens,
+                history_records, evolve_state=es,
             )
             if cmd_result is None:
                 break  # /quit
@@ -342,6 +403,34 @@ async def _chat_loop(
                 spec = ds.specs[ds.stage - 1]
                 console.rule(f"[bold cyan]{spec.name}[/bold cyan]")
                 user_input = msg  # fall through to agent loop
+            elif cmd_result == "EVOLVE_ENTER":
+                if es.active:
+                    console.print("[yellow]Already in evolve mode.[/yellow]")
+                    continue
+                _enter_evolve_mode(
+                    es, tool_registry, kernels, system_prompt, lean_prompt,
+                )
+                if es.active:
+                    console.print(
+                        "\n[bold cyan]Evolve mode[/bold cyan] active. "
+                        "Use evolve tools to edit, compile, and optimize."
+                    )
+                    console.print("[dim]Type /evolve-status or /evolve-exit.[/dim]")
+                continue
+            elif cmd_result == "EVOLVE_STATUS":
+                _show_evolve_status(es)
+                continue
+            elif cmd_result == "EVOLVE_ROLLBACK":
+                _evolve_rollback(es)
+                continue
+            elif cmd_result == "EVOLVE_EXIT":
+                if not es.active:
+                    console.print("[yellow]Not in evolve mode.[/yellow]")
+                    continue
+                _exit_evolve_mode(es)
+                if not es.active:
+                    console.print("[cyan]Exited evolve mode.[/cyan]")
+                continue
             else:
                 continue
 
@@ -356,19 +445,28 @@ async def _chat_loop(
         # Run agent loop — show tool calls in real time for transparency
         text_buffer = []
         tool_calls_made: list[str] = []
+        tool_call_records: list[ToolCallRecord] = []
+        pending_tool_args: dict[str, dict] = {}
+        done_data: dict = {}
         display = ChatStatusDisplay(timeout=timeout, console=console, collapsed=_collapsed)
         display.start()
         try:
+            # Use evolve tools and prompt when in evolve mode
+            active_registry = es.tool_registry if es.active else tool_registry
+            # C3: Use evolve-specific system prompt when in evolve mode
+            active_prompt = es.evolve_system_prompt if es.active and es.evolve_system_prompt else system_prompt
+            active_lean = es.original_lean_prompt if es.active else lean_prompt
+
             loop_kwargs = dict(
                 backend=backend,
-                registry=tool_registry,
+                registry=active_registry,
                 user_message=user_input,
-                system_prompt=system_prompt,
+                system_prompt=active_prompt,
                 history=history[-10:],
                 stream=False,
                 timeout=timeout,
                 move_timeout=move_timeout,
-                lean_system_prompt=lean_prompt,
+                lean_system_prompt=active_lean,
             )
             if ds.active:
                 loop_kwargs.update(ds.loop_overrides())
@@ -385,6 +483,7 @@ async def _chat_loop(
                     display.set_tool(name)
                     args = event.data.get("arguments", {}) if event.data else {}
                     tool_calls_made.append(name)
+                    pending_tool_args[name] = args
                     args_short = ", ".join(
                         f"{k}={v}" for k, v in list(args.items())[:3]
                     )
@@ -394,6 +493,14 @@ async def _chat_loop(
                 elif event.type == "tool_result":
                     display.set_status("waiting for LLM")
                     if event.data:
+                        tc_name = event.data.get("name", "")
+                        tool_call_records.append(ToolCallRecord(
+                            name=tc_name,
+                            arguments=pending_tool_args.pop(tc_name, {}),
+                            success=event.data.get("success", False),
+                            summary=event.data.get("summary", ""),
+                            elapsed=event.data.get("elapsed", 0),
+                        ))
                         summary = event.data.get("summary", "")
                         ok = "\u2713" if event.data.get("success") else "\u2717"
                         t = event.data.get("elapsed", 0)
@@ -410,16 +517,17 @@ async def _chat_loop(
                     _collapsed = display.collapsed  # persist toggle state
                     display.stop()
                     display.flush()  # print tool entries to scrollback
-                    if event.data:
-                        turns = event.data.get("turns", 0)
-                        n_tools = event.data.get("tool_calls", 0)
-                        tokens = event.data.get("total_tokens", 0)
-                        total_elapsed = event.data.get("total_elapsed", 0)
+                    done_data = event.data or {}
+                    if done_data:
+                        turns = done_data.get("turns", 0)
+                        n_tools = done_data.get("tool_calls", 0)
+                        tokens = done_data.get("total_tokens", 0)
+                        total_elapsed = done_data.get("total_elapsed", 0)
                         total_tokens += tokens
 
-                        budget = event.data.get("budget", 0)
-                        budget_pct = event.data.get("budget_pct", 0)
-                        budget_remaining = event.data.get("budget_remaining", 0)
+                        budget = done_data.get("budget", 0)
+                        budget_pct = done_data.get("budget_pct", 0)
+                        budget_remaining = done_data.get("budget_remaining", 0)
                         budget_str = ""
                         if budget > 0:
                             remaining_pct = round(
@@ -442,6 +550,28 @@ async def _chat_loop(
 
         # Render collected text as markdown
         full_text = "".join(text_buffer)
+
+        # Record turn for /export
+        usage_rec = None
+        if done_data:
+            usage_rec = UsageRecord(
+                turns=done_data.get("turns", 0),
+                tool_calls=done_data.get("tool_calls", 0),
+                total_tokens=done_data.get("total_tokens", 0),
+                total_elapsed=done_data.get("total_elapsed", 0),
+                budget=done_data.get("budget", 0),
+                budget_peak=done_data.get("budget_peak", 0),
+                budget_remaining=done_data.get("budget_remaining", 0),
+                budget_pct=done_data.get("budget_pct", 0),
+                compaction_count=done_data.get("compaction_count", 0),
+            )
+        history_records.record_turn(TurnRecord(
+            user_input=user_input,
+            ai_response=full_text,
+            tool_calls=tool_call_records,
+            usage=usage_rec,
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ))
         if full_text:
             console.print()
             console.print(Panel(
@@ -470,6 +600,8 @@ def _handle_command(
     kernels: list,
     registry: ToolRegistry,
     total_tokens: int,
+    history_records: ChatHistory | None = None,
+    evolve_state: _EvolveState | None = None,
 ) -> bool | None | str:
     """Handle special /commands. Returns None for /quit, True otherwise, 'NEXT_STAGE' for /next."""
     parts = cmd.split()
@@ -485,7 +617,13 @@ def _handle_command(
             "[bold]/kernels[/bold] — List loaded kernels\n"
             "[bold]/tree <id>[/bold] — Show OptTree for kernel\n"
             "[bold]/tokens[/bold] — Show token usage\n"
+            "[bold]/export [path][/bold] — Export last turn to markdown\n"
+            "[bold]/export-all [path][/bold] — Export all turns to markdown\n"
             "[bold]/next[/bold] — Jump to next analysis stage (deep mode)\n"
+            "[bold]/evolve[/bold] — Enter evolve optimization mode\n"
+            "[bold]/evolve-status[/bold] — Show evolve session status\n"
+            "[bold]/evolve-rollback[/bold] — Rollback last experiment\n"
+            "[bold]/evolve-exit[/bold] — Exit evolve mode\n"
             "[bold]/quit[/bold] — Exit chat",
             title="Commands",
         ))
@@ -508,6 +646,62 @@ def _handle_command(
 
     if command == "/next":
         return "NEXT_STAGE"
+
+    # --- Evolve mode commands ---
+    if command == "/evolve":
+        return "EVOLVE_ENTER"
+
+    if command == "/evolve-status":
+        return "EVOLVE_STATUS"
+
+    if command == "/evolve-rollback":
+        return "EVOLVE_ROLLBACK"
+
+    if command == "/evolve-exit":
+        return "EVOLVE_EXIT"
+
+    if command == "/export":
+        if history_records is None or not history_records.turns:
+            console.print("[red]No turns to export yet.[/red]")
+            return True
+        from tachyon.chat.export import (
+            render_turn_markdown,
+            write_export,
+        )
+        path = parts[1] if len(parts) > 1 else "chat-export.md"
+        last = history_records.last_turn()
+        if last is None:
+            console.print("[red]No turns to export.[/red]")
+            return True
+        content = render_turn_markdown(last, history_records.model_info)
+        try:
+            resolved = write_export(content, path)
+            console.print(f"[green]Exported to {resolved}[/green]")
+        except OSError as e:
+            console.print(f"[red]Export failed: {e}[/red]")
+        return True
+
+    if command == "/export-all":
+        if history_records is None or not history_records.turns:
+            console.print("[red]No turns to export yet.[/red]")
+            return True
+        from tachyon.chat.export import (
+            render_all_turns_markdown,
+            write_export,
+        )
+        path = parts[1] if len(parts) > 1 else "chat-export-all.md"
+        content = render_all_turns_markdown(
+            history_records.turns, history_records.model_info,
+        )
+        try:
+            resolved = write_export(content, path)
+            console.print(
+                f"[green]Exported {len(history_records.turns)} turns "
+                f"to {resolved}[/green]"
+            )
+        except OSError as e:
+            console.print(f"[red]Export failed: {e}[/red]")
+        return True
 
     console.print(f"[red]Unknown command: {command}[/red]. Type /help.")
     return True
@@ -651,3 +845,147 @@ def _rule_only_mode(
         reporter = MarkdownReporter()
         md = reporter.render(ctx)
         console.print(Markdown(md))
+
+
+# ---------------------------------------------------------------------------
+# Evolve mode helpers
+# ---------------------------------------------------------------------------
+
+def _enter_evolve_mode(
+    es: _EvolveState,
+    base_registry: ToolRegistry,
+    kernels: list,
+    system_prompt: str,
+    lean_prompt: str,
+) -> None:
+    """Set up evolve mode: register evolve tools, build evolve system prompt."""
+    from tachyon.evolve.config import EvolveConfig
+    from tachyon.evolve.context import EvolveContext
+    from tachyon.evolve.git import GitRollback
+    from tachyon.evolve.persona import build_evolve_system_prompt
+    from tachyon.evolve.session import EvolveSession
+    from tachyon.evolve.tools import register_evolve_tools
+
+    # Create evolve registry with all existing + evolve tools
+    evolve_registry = ToolRegistry()
+
+    # Re-register all existing tools (they capture base ctx via closure)
+    for tool_def in base_registry.all_definitions():
+        evolve_registry.register(tool_def)
+
+    # Set up evolve infrastructure
+    evolve_config = EvolveConfig()
+    git = GitRollback()
+
+    if not git.verify_git_repo():
+        console.print("[red]Error: Not a git repository. Evolve requires git for rollback.[/red]")
+        return
+
+    if not git.check_working_tree_clean():
+        auto_commit = git.auto_commit_uncommitted()
+        if auto_commit is not None:
+            _, short = auto_commit
+            console.print(
+                f"[yellow]Working tree had uncommitted changes, "
+                f"auto-committed as {short}.[/yellow]"
+            )
+
+    git.ensure_gitignore_entries()
+    git.cleanup_stale_artifacts()
+
+    from tachyon.analyzers.base import AnalyzerRegistry
+    from tachyon.tools.context import SessionContext
+
+    analyzer_registry = AnalyzerRegistry()
+    analyzer_registry.auto_register()
+
+    base_session = SessionContext(
+        kernels=kernels,
+        allowed_source_paths=SessionContext.build_allowed_source_paths(kernels),
+        registry=analyzer_registry,
+    )
+
+    evolve_session = EvolveSession(config=evolve_config)
+
+    evolve_ctx = EvolveContext(
+        base=base_session,
+        evolve=evolve_session,
+        git=git,
+        config=evolve_config,
+    )
+
+    # Register evolve tools (they capture evolve_ctx via closure)
+    register_evolve_tools(evolve_registry, evolve_ctx)
+
+    # Build evolve system prompt
+    evolve_prompt = build_evolve_system_prompt(
+        evolve_registry,
+    )
+
+    es.activate(
+        base_registry, evolve_registry, evolve_ctx,
+        system_prompt, lean_prompt,
+        evolve_system_prompt=evolve_prompt,
+    )
+
+
+def _show_evolve_status(es: _EvolveState) -> None:
+    """Display current evolve session status."""
+    if not es.active:
+        console.print("[yellow]Not in evolve mode. Use /evolve to enter.[/yellow]")
+        return
+
+    summary = es.status_summary
+    if "active" in summary and not summary["active"]:
+        console.print("[yellow]No active evolve session.[/yellow]")
+        return
+
+    from rich.table import Table
+
+    table = Table(title="Evolve Status", show_header=False, border_style="cyan")
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Iteration", f"{summary['current_iteration']} / {summary['max_iterations']}")
+    table.add_row("Converged", str(summary["has_converged"]))
+    table.add_row("Finished", str(summary["is_finished"]))
+    table.add_row("Best Iteration", str(summary["best_iteration"]))
+    table.add_row("Best Improvement", f"{summary['best_improvement_pct']:.1f}%")
+
+    if summary.get("experiments_summary"):
+        exps = summary["experiments_summary"]
+        table.add_row("Experiments", str(len(exps)))
+        for e in exps[-5:]:
+            table.add_row(f"  Iter {e['iteration']}", f"{e['status']} — {e.get('decision', '')[:40]}")
+
+    console.print(table)
+
+
+def _evolve_rollback(es: _EvolveState) -> None:
+    """Rollback the most recent experiment."""
+    if not es.active or es.ctx is None:
+        console.print("[yellow]Not in evolve mode.[/yellow]")
+        return
+
+    experiments = es.ctx.evolve.experiments
+    if not experiments:
+        console.print("[yellow]No experiments to rollback.[/yellow]")
+        return
+
+    last = experiments[-1]
+    if last.git_commit_hash:
+        success = es.ctx.git.rollback(last.git_commit_hash)
+        if success:
+            console.print(f"[green]Rolled back iteration {last.iteration}.[/green]")
+        else:
+            console.print(f"[red]Rollback failed for iteration {last.iteration}.[/red]")
+    else:
+        console.print("[yellow]No commit hash for rollback.[/yellow]")
+
+
+def _exit_evolve_mode(es: _EvolveState) -> None:
+    """Exit evolve mode, restore normal tools and prompt."""
+    if not es.active:
+        return
+    es.deactivate()
+

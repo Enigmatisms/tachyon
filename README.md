@@ -4,9 +4,9 @@ English Doc (Current) | [中文文档](./README.zh-CN.md)
 
 **AI empowered CUDA kernel profiler**
 
-Tachyon `/ˈtakēˌän/` (tachyon — a theoretical particle that travels faster than light) is a CUDA kernel performance analyzer that combines LLM-powered agents with traditional rule-based analysis. Unlike existing open-source tools, Tachyon bridges the full path from NCU metrics to CUDA source code to low-level instructions (PTX/SASS), so performance analysis doesn't stop at aggregate counters — it traces back through the instruction level all the way to your source lines. Like a tachyon traveling faster than the speed of light and reversing through time, we aim to optimize faster than your current speed-of-light, with the ability to trace back to root causes.
+Tachyon `/ˈtakēˌän/` (tachyon — a theoretical particle that travels faster than light) is a CUDA kernel performance analysis and optimization toolkit. It combines LLM-powered agents with traditional rule-based analysis to bridge the full path from NCU metrics to CUDA source code to low-level instructions (PTX/SASS), so performance analysis doesn't stop at aggregate counters — it traces back through the instruction level all the way to your source lines. Beyond analysis, the **evolve** mode automates the optimization loop: an agent reads profiling data, edits source code, rebuilds, re-profiles, and iterates until convergence — no manual tuning required.
 
-Fully integrated in Python. Supports end-to-end profiling (run an executable directly after `tachyon`, like ncu) as well as analysis of manually exported NCU reports. Multiple LLM agent vendors are supported.
+Fully integrated in Python. Supports end-to-end profiling (run an executable directly after `tachyon`, like ncu), interactive AI-driven analysis, and fully automated iterative optimization. Multiple LLM agent vendors are supported.
 
 ## Features
 
@@ -14,6 +14,7 @@ Fully integrated in Python. Supports end-to-end profiling (run an executable dir
 - **Smart two-stage profiling**: quick scan finds the hottest top-K kernels, then deep dive collects detailed metrics only where it matters.
 - **Rule engine + AI agent**: 7 built-in analyzers (roofline, memory, occupancy, warp stall, ...) produce structured findings; an LLM agent with 9 specialized tools supports interactive follow-up.
 - **Profile diff**: compare two `.ncu-rep` files side by side, highlight regressions.
+- **Evolve mode**: automated iterative optimization — LLM agent reads NCU profiling data, edits CUDA source, compiles, re-profiles, and accepts/rolls back per iteration. No manual tuning loops.
 - **MCP server**: expose all analysis tools over MCP (stdio transport) for seamless integration with Claude Code, Ducc, Cursor, and custom agents.
 
 ## Quick Start
@@ -41,6 +42,7 @@ tachyon analyze report.ncu-rep
 tachyon chat report.ncu-rep --model claude-sonnet-4-20250514
 tachyon profile ./my_app --strategy radical
 tachyon diff before.ncu-rep after.ncu-rep
+tachyon evolve ./my_app --build "make -j8" --max-iterations 10
 tachyon serve --mcp --report report.ncu-rep
 ```
 
@@ -52,6 +54,7 @@ tachyon serve --mcp --report report.ncu-rep
 | `tachyon chat` | Interactive AI analysis with 9 specialized tools. |
 | `tachyon profile` | End-to-end: profile a CUDA executable, then analyze. |
 | `tachyon diff` | Compare two reports, flag performance changes. |
+| `tachyon evolve` | Automated iterative kernel optimization via LLM agent. |
 | `tachyon serve` | Start MCP server for external agents. |
 
 `tachyon <command> --help` for full options. See [CLI Reference](docs/cli-reference.md).
@@ -171,6 +174,7 @@ src/tachyon/
 ├── correlator/    Three-way mapping engine (metrics <-> source <-> SASS)
 ├── reader/        NCU .ncu-rep binary report parser
 ├── profiler/      Two-stage smart profiling, tool path resolver
+├── evolve/        Iterative optimization orchestrator, tools, persona
 ├── models/        Core data models (KernelReport, Finding, OptTree, ...)
 ├── config/        TOML configuration with layered overrides
 ├── report/        Output renderers (terminal, markdown)
@@ -194,18 +198,12 @@ src/tachyon/
 | [Configuration](docs/configuration.md) | config.toml settings, env vars, priority chain |
 | [SDK Guide](docs/sdk-guide.md) | Python SDK patterns, common usage, API reference |
 | [Multi-Vendor LLM & Ducc Integration](docs/multi-vendor-integration.md) | LLM switching, Ducc MCP integration, custom providers |
+| [Evolve Guide](docs/evolve-guide.md) | Automated iterative optimization: usage, config, real-world examples |
 
 ## Preliminary Showcasing [WIP]
 
-Using tachyon to profile [`cuda-pt` (my CUDA path tracing renderer)](https://github.com/Enigmatisms/cuda-pt), the following is generated using `tachyon profile` (end2end) mode, and the Agent API service is provided by MINIMAX-M2.5. The following are some partial screenshots.
+For this part, sees: [Showcasing](assets/README.md)
 
-![1.png](./assets/1.png)
-
-![2.png](./assets/2.png)
-
-![3.png](./assets/3.png)
-
-![4.png](./assets/4.png)
 
 ## License
 

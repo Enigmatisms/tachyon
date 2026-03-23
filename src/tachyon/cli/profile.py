@@ -78,6 +78,10 @@ from tachyon.config.settings import TachyonConfig
 @click.option(
     "--verbose", "-v", is_flag=True, help="Show verbose output.",
 )
+@click.option(
+    "--export", type=click.Path(path_type=Path), default=None,
+    help="Export AI analysis to markdown file.",
+)
 def profile(
     executable: str,
     exe_args: tuple[str, ...],
@@ -92,6 +96,7 @@ def profile(
     lang: str | None,
     model: str | None,
     verbose: bool,
+    export: Path | None,
 ) -> None:
     """End-to-end: profile → analyze → report.
 
@@ -182,6 +187,7 @@ def profile(
         no_ai=no_ai,
         output_file=(output / "analysis.txt") if output else None,
         ai_layers=ai_layers,
+        ai_output_file=export,
     )
 
     # ── Depth hint ──

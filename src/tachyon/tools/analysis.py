@@ -40,8 +40,7 @@ def register_analysis_tools(registry: ToolRegistry, ctx: SessionContext) -> None
                     available = [a.name() for a in ctx.registry.all_analyzers()]
                     return ToolResult.fail(
                         ErrorCode.ANALYZER_FAILED,
-                        f"Unknown analyzer: {analyzer_name}",
-                        f"Available: {', '.join(available)}",
+                        f"Unknown analyzer '{analyzer_name}'. Available: {', '.join(available)}",
                     )
                 if not found.can_run(kernel):
                     return ToolResult.fail(

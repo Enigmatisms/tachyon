@@ -247,6 +247,7 @@ class NcuProfiler:
         metric_set_override: str | None = None,
         metrics_override: str | None = None,
         verbose: bool = False,
+        no_spinner: bool = False,
     ) -> ToolResult[ProfilingResult]:
         """Stage 1: Quick Scan -- profile all kernels with basic/detailed metrics.
 
@@ -274,6 +275,7 @@ class NcuProfiler:
         return self._run_ncu(
             cmd, stage=1, output_path=out_file,
             timeout=stage1_cfg.timeout_sec, verbose=verbose,
+            no_spinner=no_spinner,
         )
 
     def profile_targeted(
@@ -288,6 +290,7 @@ class NcuProfiler:
         metric_set_override: str | None = None,
         metrics_override: str | None = None,
         verbose: bool = False,
+        no_spinner: bool = False,
     ) -> ToolResult[ProfilingResult]:
         """Stage 2: Deep Dive -- targeted metrics for top-K kernels only.
 
@@ -322,6 +325,7 @@ class NcuProfiler:
         return self._run_ncu(
             cmd, stage=2, output_path=out_file,
             timeout=stage2_cfg.timeout_sec, verbose=verbose,
+            no_spinner=no_spinner,
         )
 
     def _build_command(
@@ -381,12 +385,16 @@ class NcuProfiler:
         output_path: Path,
         timeout: int,
         verbose: bool = False,
+        *,
+        no_spinner: bool = False,
     ) -> ToolResult[ProfilingResult]:
         """Execute ncu subprocess with safety constraints.
 
         Args:
             verbose: If True, stream full NCU stderr to terminal.
                      If False, show a live spinner animation instead.
+            no_spinner: If True, skip the NcuSpinner animation (use when another
+                        Rich Live display is already active, e.g. evolve panel).
         """
         from tachyon.utils.progress import (
             NcuSpinner,
@@ -398,12 +406,13 @@ class NcuProfiler:
 
         cmd_summary = f"{cmd[0]} ... {cmd[-1]}" if len(cmd) > 2 else " ".join(cmd)
         logger.info("Stage %d: running %s", stage, " ".join(cmd))
-        print_stage_header(stage, cmd_summary)
+        if not no_spinner:
+            print_stage_header(stage, cmd_summary)
         start = time.monotonic()
 
         # Non-verbose mode: spinner animation
         spinner: NcuSpinner | None = None
-        if not verbose:
+        if not verbose and not no_spinner:
             spinner = NcuSpinner(stage)
             spinner.start()
 
@@ -432,12 +441,13 @@ class NcuProfiler:
             proc.kill()
             proc.wait()
             elapsed = time.monotonic() - start
-            print_stage_result(stage, elapsed, success=False)
-            print_error_panel(
-                f"Stage {stage} Timeout",
-                f"ncu timed out after {timeout}s",
-                suggestion=f"Increase timeout or reduce kernel count. Command: {' '.join(cmd[:6])}...",
-            )
+            if not no_spinner:
+                print_stage_result(stage, elapsed, success=False)
+                print_error_panel(
+                    f"Stage {stage} Timeout",
+                    f"ncu timed out after {timeout}s",
+                    suggestion=f"Increase timeout or reduce kernel count. Command: {' '.join(cmd[:6])}...",
+                )
             return ToolResult.fail(
                 ErrorCode.UNKNOWN,
                 f"ncu Stage {stage} timed out after {timeout}s",
@@ -447,11 +457,12 @@ class NcuProfiler:
                 ),
             )
         except FileNotFoundError:
-            print_error_panel(
-                "NCU Not Found",
-                f"ncu binary not found at: {cmd[0]}",
-                suggestion="Install CUDA Toolkit or set [tools] ncu_path in config.",
-            )
+            if not no_spinner:
+                print_error_panel(
+                    "NCU Not Found",
+                    f"ncu binary not found at: {cmd[0]}",
+                    suggestion="Install CUDA Toolkit or set [tools] ncu_path in config.",
+                )
             return ToolResult.fail(
                 ErrorCode.TOOL_NOT_FOUND,
                 f"ncu binary not found at: {cmd[0]}",
@@ -466,39 +477,40 @@ class NcuProfiler:
         stderr_text = "\n".join(stderr_lines)
 
         if returncode != 0:
-            print_stage_result(stage, elapsed, success=False)
+            if not no_spinner:
+                print_stage_result(stage, elapsed, success=False)
 
             # Classify error source for clear attribution
             source, title, detail = _classify_error(stderr_text, returncode)
 
-            if source == _ErrorSource.USER_PROGRAM:
-                print_error_panel(
-                    title,
-                    f"{detail}\n\nExit code: {returncode}",
-                    suggestion=(
-                        "This is NOT a Tachyon error — your profiled program failed. "
-                        "Fix the program and re-run. "
-                        "Use -v for full NCU output."
-                    ),
-                )
-            elif source == _ErrorSource.NCU_TOOL:
-                print_error_panel(
-                    title,
-                    f"{detail}\n\nncu exit code: {returncode}\n{stderr_text[:200]}",
-                    suggestion=(
-                        "This is an NCU profiler error. Check your NCU installation, "
-                        "GPU driver, and CUDA toolkit versions."
-                    ),
-                )
-            else:
-                # Unknown — show raw stderr for debugging
-                print_error_panel(
-                    f"Stage {stage} Failed",
-                    f"ncu exited with code {returncode}:\n{stderr_text[:300]}",
-                    suggestion="Check ncu stderr output above for details."
-                    if verbose
-                    else "Re-run with -v to see full NCU output.",
-                )
+            if not no_spinner:
+                if source == _ErrorSource.USER_PROGRAM:
+                    print_error_panel(
+                        title,
+                        f"{detail}\n\nExit code: {returncode}",
+                        suggestion=(
+                            "This is NOT a Tachyon error — your profiled program failed. "
+                            "Fix the program and re-run. "
+                            "Use -v for full NCU output."
+                        ),
+                    )
+                elif source == _ErrorSource.NCU_TOOL:
+                    print_error_panel(
+                        title,
+                        f"{detail}\n\nncu exit code: {returncode}\n{stderr_text[:200]}",
+                        suggestion=(
+                            "This is an NCU profiler error. Check your NCU installation, "
+                            "GPU driver, and CUDA toolkit versions."
+                        ),
+                    )
+                else:
+                    print_error_panel(
+                        f"Stage {stage} Failed",
+                        f"ncu exited with code {returncode}:\n{stderr_text[:300]}",
+                        suggestion="Check ncu stderr output above for details."
+                        if verbose
+                        else "Re-run with -v to see full NCU output.",
+                    )
 
             return ToolResult.fail(
                 ErrorCode.UNKNOWN,
@@ -511,14 +523,16 @@ class NcuProfiler:
             )
 
         if not output_path.exists():
-            print_stage_result(stage, elapsed, success=False)
+            if not no_spinner:
+                print_stage_result(stage, elapsed, success=False)
             return ToolResult.fail(
                 ErrorCode.UNKNOWN,
                 f"ncu completed but output file not found: {output_path}",
                 suggestion="Check ncu output path and permissions.",
             )
 
-        print_stage_result(stage, elapsed, success=True)
+        if not no_spinner:
+            print_stage_result(stage, elapsed, success=True)
 
         return ToolResult.ok(
             ProfilingResult(

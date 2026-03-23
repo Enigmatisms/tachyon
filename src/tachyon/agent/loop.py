@@ -92,6 +92,8 @@ async def run_agent_loop(
     trim_user_after_turn0: str | None = None,
     synthesis_prompt: str | None = None,
     prefer_lang: str | None = None,
+    max_turns: int = MAX_TURNS,
+    skip_synthesis: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the multi-turn agent loop.
 
@@ -134,7 +136,7 @@ async def run_agent_loop(
 
     tool_defs = registry.all_definitions()
 
-    for turn in range(MAX_TURNS):
+    for turn in range(max_turns):
         usage.turns = turn + 1
 
         # Total timeout check
@@ -171,9 +173,9 @@ async def run_agent_loop(
             usage.compaction_count = ctx.compaction_count
 
         # Reserve last 2 turns for synthesis (force no tools)
-        remaining = MAX_TURNS - turn
-        is_synthesis = remaining <= 2 and turn > 0
-        is_final = (turn == MAX_TURNS - 1)
+        remaining = max_turns - turn
+        is_synthesis = (not skip_synthesis) and remaining <= 2 and turn > 0
+        is_final = (turn == max_turns - 1)
 
         if is_synthesis and remaining == 2:
             synth = synthesis_prompt or (
@@ -225,13 +227,17 @@ async def run_agent_loop(
                     await asyncio.sleep(2)  # brief pause before retry
             except Exception as e:
                 err_str = str(e)
-                if "429" in err_str and attempt < max_retries:
-                    llm_error = "rate_limit"
+                is_retryable = (
+                    "429" in err_str
+                    or "Error code: 5" in err_str  # 5xx server errors
+                )
+                if is_retryable and attempt < max_retries:
                     wait = 5 * (attempt + 1)  # 5s, 10s backoff
                     yield AgentEvent(
                         type="system",
-                        content=f"LLM rate limited (429), waiting {wait}s "
-                                f"before retry ({attempt + 1}/{max_retries})...",
+                        content=f"LLM error ({err_str[:60]}), "
+                                f"waiting {wait}s before retry "
+                                f"({attempt + 1}/{max_retries})...",
                     )
                     await asyncio.sleep(wait)
                 else:
