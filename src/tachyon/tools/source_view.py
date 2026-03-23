@@ -62,22 +62,28 @@ def register_source_view_tools(
                     "Use list_source_files to see available files.",
                 )
 
-            if not os.path.isfile(resolved):
-                return ToolResult.fail(
-                    ErrorCode.NO_DEBUG_INFO,
-                    f"File '{resolved}' does not exist on disk.",
-                    "The file may have been moved since profiling.",
-                )
-
-            # Read file
-            try:
-                with open(resolved, encoding="utf-8", errors="replace") as f:
-                    all_lines = f.readlines()
-            except OSError as e:
-                return ToolResult.fail(
-                    ErrorCode.NO_DEBUG_INFO,
-                    f"Cannot read file '{resolved}': {e}",
-                )
+            # Read file (disk first, fall back to embedded source)
+            all_lines: list[str] = []
+            if os.path.isfile(resolved):
+                try:
+                    with open(resolved, encoding="utf-8", errors="replace") as f:
+                        all_lines = f.readlines()
+                except OSError as e:
+                    return ToolResult.fail(
+                        ErrorCode.NO_DEBUG_INFO,
+                        f"Cannot read file '{resolved}': {e}",
+                    )
+            else:
+                embedded = ctx.embedded_sources.get(resolved)
+                if not embedded:
+                    return ToolResult.fail(
+                        ErrorCode.NO_DEBUG_INFO,
+                        f"File '{resolved}' does not exist on disk and "
+                        "no embedded source available.",
+                        "The file may have been moved since profiling, "
+                        "or the report was captured without --import-source yes.",
+                    )
+                all_lines = embedded.splitlines()
 
             total_lines = len(all_lines)
 

@@ -633,6 +633,9 @@ def register_evolve_tools(
             ctx.base.allowed_source_paths = (
                 ctx.base.build_allowed_source_paths(new_kernels, ctx.base.mapper)
             )
+            ctx.base.embedded_sources = (
+                ctx.base.collect_embedded_sources(new_kernels)
+            )
 
             # Update experiment record
             record = ctx.evolve.experiments[-1] if ctx.evolve.experiments else None

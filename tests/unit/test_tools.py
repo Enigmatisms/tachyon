@@ -1833,8 +1833,7 @@ class TestSourceViewTools:
 
     @pytest.mark.asyncio
     async def test_read_source_file_nonexistent_in_whitelist(self):
-        """File in whitelist but deleted returns NO_DEBUG_INFO."""
-        # Create a ctx with a path that doesn't exist
+        """File in whitelist but deleted and no embedded source returns NO_DEBUG_INFO."""
         ctx = SessionContext(
             kernels=[],
             allowed_source_paths={"/nonexistent/kernel.cu"},
@@ -1847,9 +1846,50 @@ class TestSourceViewTools:
         )
         assert result.success is False
         assert result.error.code == ErrorCode.NO_DEBUG_INFO
+        assert "no embedded source" in result.error.message
 
-    def test_build_allowed_source_paths_filters_missing(self):
-        """build_allowed_source_paths keeps only existing files."""
+    @pytest.mark.asyncio
+    async def test_read_source_file_embedded_fallback(self):
+        """read_source_file falls back to embedded source when file not on disk."""
+        embedded_content = (
+            "#include <cstdio>\n"
+            "__global__ void kernel() {\n"
+            "    printf(\"hello\");\n"
+            "}\n"
+        )
+        kernel = KernelReport(
+            kernel_name="test",
+            demangled_name="test",
+            launch_params=LaunchParams(
+                grid=(1, 1, 1), block=(256, 1, 1),
+                shared_mem_bytes=0, registers_per_thread=32,
+            ),
+            device_info=DeviceInfo(
+                name="TestGPU", compute_capability=(8, 0),
+                sm_count=108, max_clock_mhz=1410,
+                memory_bus_width=384, peak_memory_bandwidth_gbps=2039.0,
+            ),
+            source_files={"/nonexistent/kernel.cu": embedded_content},
+        )
+        ctx = SessionContext(
+            kernels=[kernel],
+            allowed_source_paths={"/nonexistent/kernel.cu"},
+        )
+        reg = ToolRegistry()
+        register_source_view_tools(reg, ctx)
+
+        result = await reg.execute(
+            "read_source_file", {"file": "/nonexistent/kernel.cu"}
+        )
+        assert result.success is True
+        data = result.data
+        assert data["total_lines"] == 4
+        assert data["file"] == "/nonexistent/kernel.cu"
+        assert "#include" in data["lines"][0]["content"]
+        assert "printf" in data["lines"][2]["content"]
+
+    def test_build_allowed_source_paths_keeps_embedded(self):
+        """build_allowed_source_paths keeps files with embedded content even when missing from disk."""
         import os
 
         from tachyon.models.kernel import KernelReport
@@ -1867,10 +1907,12 @@ class TestSourceViewTools:
                 memory_bus_width=384, peak_memory_bandwidth_gbps=2039.0,
             ),
             source_files={
-                os.path.abspath(__file__): "embedded",  # exists
-                "/nonexistent/path.cu": "embedded",  # does not exist
+                os.path.abspath(__file__): "embedded",  # exists on disk
+                "/nonexistent/path.cu": "embedded",  # NOT on disk, has content
+                "/no/content.cu": "",  # NOT on disk, no content
             },
         )
         paths = SessionContext.build_allowed_source_paths([kernel])
         assert os.path.abspath(__file__) in paths
-        assert "/nonexistent/path.cu" not in paths
+        assert "/nonexistent/path.cu" in paths
+        assert "/no/content.cu" not in paths
