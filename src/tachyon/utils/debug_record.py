@@ -190,3 +190,22 @@ def record_tool(
         _write_tool(name, arguments, result, elapsed, success)
     except Exception:
         pass
+
+
+def record_response(content: str) -> None:
+    """Record an LLM response to the debug log.
+
+    Call after ``backend.chat_completion()`` for standalone calls
+    (e.g. iteration summaries) that don't go through the agent loop.
+    """
+    if _level < _L.PROMPT or _fh is None:
+        return
+    try:
+        cl = len(content) if content else 0
+        _fh.write(f"[ASSISTANT] ({cl} chars)\n")
+        if content:
+            _fh.write(content + "\n")
+        _fh.write("\n")
+        _safe_flush()
+    except Exception:
+        pass

@@ -155,3 +155,6 @@ stage2_hint = """
 [depth.hint]
 basic = "提示：尝试 --deep 进行 2 层分析，或 --radical 进行完整 3 层分析。"
 deep = "提示：尝试 --radical 进行 3 层分析，搭配激进 NCU 采集策略。"
+
+[evolve.iteration]
+prompt = "优化此kernel。严格遵循: 分析(1-2次) → 读文件+编辑(2-3次) → compile_kernel → run_benchmark → reprofile → compare_metrics。完成测量后用 {marker} 输出1-3句总结。共 {max_turns} 轮，第 {half} 轮前须完成编译。"

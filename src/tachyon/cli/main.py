@@ -41,5 +41,6 @@ def app() -> None:
 import tachyon.cli.analyze  # noqa: E402, F401
 import tachyon.cli.chat  # noqa: E402, F401  # M3: AI Agent chat
 import tachyon.cli.diff  # noqa: E402, F401  # M5: Profile diff
+import tachyon.cli.evolve  # noqa: E402, F401  # M6: Evolve optimization
 import tachyon.cli.profile  # noqa: E402, F401  # M4: E2E profiling
 import tachyon.cli.serve  # noqa: E402, F401  # M5: MCP serve

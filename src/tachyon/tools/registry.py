@@ -10,6 +10,7 @@ parameters use minimal required fields. Tool results are serialized compactly.
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -121,6 +122,24 @@ class ToolRegistry:
                 )
         if not isinstance(arguments, dict):
             arguments = {}
+        # Filter arguments to match handler signature (LLM may pass extras)
+        try:
+            sig = inspect.signature(tool.handler)
+            has_var_kw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+            if not has_var_kw:
+                valid = {
+                    name for name, p in sig.parameters.items()
+                    if p.kind in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                }
+                arguments = {k: v for k, v in arguments.items() if k in valid}
+        except (TypeError, ValueError):
+            pass
         try:
             return await tool.handler(**arguments)
         except Exception as e:

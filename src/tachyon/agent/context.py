@@ -50,6 +50,7 @@ class ToolValue(IntEnum):
 
 # Map tool names to their value level.
 _TOOL_VALUE_MAP: dict[str, ToolValue] = {
+    # Analysis tools (existing)
     "read_source_file": ToolValue.SOURCE,
     "get_sass_for_source_line": ToolValue.SOURCE,
     "get_stall_analysis_for_line": ToolValue.ANALYSIS,
@@ -60,6 +61,13 @@ _TOOL_VALUE_MAP: dict[str, ToolValue] = {
     "get_kernel_metrics": ToolValue.META,
     "get_kernel_summary": ToolValue.META,
     "list_kernels": ToolValue.META,
+    # Evolve tools
+    "edit_source_file": ToolValue.SOURCE,
+    "reprofile": ToolValue.ANALYSIS,
+    "compare_metrics": ToolValue.ANALYSIS,
+    "compile_kernel": ToolValue.OTHER,
+    "run_benchmark": ToolValue.META,
+    "get_evolve_status": ToolValue.OTHER,
 }
 
 

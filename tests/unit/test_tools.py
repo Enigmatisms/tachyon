@@ -698,8 +698,7 @@ class TestAnalysisTools:
         assert result.success is False
         assert result.error.code == ErrorCode.ANALYZER_FAILED
         assert "nonexistent" in result.error.message.lower()
-        # Suggestion should list available analyzers
-        assert "available" in result.error.suggestion.lower()
+        assert "available" in result.error.message.lower()
 
     # --- run_analysis (no registry) ---
 
