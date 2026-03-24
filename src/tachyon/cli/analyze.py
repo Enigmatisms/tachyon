@@ -73,7 +73,7 @@ def analyze(
         tachyon analyze report.ncu-rep --export analysis.md
     """
     log_level = logging.DEBUG if verbose else (logging.WARNING if quiet else logging.INFO)
-    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+    logging.getLogger().setLevel(log_level)
 
     config = TachyonConfig.load()
     if model:

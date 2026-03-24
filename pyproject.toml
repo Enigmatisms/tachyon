@@ -20,6 +20,7 @@ dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "prompt-toolkit>=3.0",
+    "structlog>=24.0",
     "tomli>=2.0;python_version<'3.11'",
 ]
 

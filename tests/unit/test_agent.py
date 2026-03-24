@@ -518,8 +518,8 @@ class TestAgentLoop:
         assert len(trim_events) == 0
 
         # With debug: trim event emitted
-        import tachyon.utils.debug_record as _dr
-        _dr._level = _dr._L.PROMPT
+        from tachyon.utils.log import _L, agent_logger as _al
+        _al._level = _L.PROMPT
         try:
             events = await _run_with(debug=True)
             trim_events = [e for e in events
@@ -527,7 +527,7 @@ class TestAgentLoop:
             assert len(trim_events) == 1
             assert "saved" in trim_events[0].content
         finally:
-            _dr._level = _dr._L.NONE
+            _al._level = _L.NONE
 
     @pytest.mark.asyncio
     async def test_history_prepended(self):
