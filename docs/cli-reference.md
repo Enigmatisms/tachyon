@@ -1,63 +1,12 @@
 # CLI 命令参考
 
-Tachyon 提供五个命令，统一通过 `tachyon` 入口调用。
+Tachyon 提供四个命令，统一通过 `tachyon` 入口调用。
 `tachyon --help` 查看总览，`tachyon <command> --help` 查看单个命令的用法。
 
 ```
 tachyon --version      显示版本号
 tachyon --help         显示帮助信息
 ```
-
----
-
-## tachyon analyze
-
-解析 `.ncu-rep` 报告文件，运行基于规则的分析器，输出性能诊断结果。
-
-```
-tachyon analyze REPORT_PATH [OPTIONS]
-```
-
-### 参数
-
-| 参数 | 说明 |
-|------|------|
-| `REPORT_PATH` | `.ncu-rep` 文件路径（必填）。 |
-
-### 选项
-
-| 选项 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--format` | `terminal` / `markdown` / `json` | `terminal` | 输出格式。 |
-| `--output`, `-o` | PATH | stdout | 将输出写入文件而非标准输出。 |
-| `--no-ai` | flag | `false` | 强制使用纯规则模式（跳过 LLM 增强）。 |
-| `--kernel`, `-k` | TEXT | 全部 | 按名称过滤 kernel，支持 glob 通配符（如 `softmax*`）。 |
-| `--verbose`, `-v` | flag | `false` | 显示全部诊断结果，包括 INFO 级别。 |
-| `--quiet`, `-q` | flag | `false` | 只显示 CRITICAL 级别的结果。 |
-
-### 示例
-
-```bash
-# 基本分析，终端输出
-tachyon analyze report.ncu-rep
-
-# 过滤指定 kernel，保存为 markdown
-tachyon analyze report.ncu-rep --kernel "softmax*" --format markdown -o results.md
-
-# 详细输出（包含所有严重级别）
-tachyon analyze report.ncu-rep -v
-
-# 只看关键问题
-tachyon analyze report.ncu-rep -q
-```
-
-### 处理流程
-
-1. 通过 `NcuReportReader` 加载 `.ncu-rep`
-2. 按 `--kernel` 过滤 kernel（如指定）
-3. 运行所有已注册的分析器
-4. 根据 `-v` / `-q` 过滤严重级别
-5. 按指定格式渲染输出
 
 ---
 
@@ -81,7 +30,7 @@ tachyon chat REPORT_FILE [OPTIONS]
 | 选项 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `--model`, `-m` | TEXT | 从配置读取 | LLM 模型（如 `gpt-4o`、`claude-sonnet-4-20250514`）。 |
-| `--provider`, `-p` | TEXT | 从配置读取 | LLM 供应商（`openai` / `anthropic` / `litellm`）。 |
+| `--provider`, `-p` | TEXT | 从配置读取 | LLM 供应商（`openai` / `anthropic`）。 |
 | `--no-ai` | flag | `false` | 强制纯规则模式（不使用 LLM）。 |
 | `--lang` | TEXT | 从配置读取 | 输出语言（`en` / `zh`）。 |
 | `--verbose`, `-v` | flag | `false` | 显示工具调用和调试信息。 |
@@ -281,15 +230,15 @@ tachyon serve --mcp
 ### 工作流 1：快速定位瓶颈
 
 ```bash
-tachyon analyze report.ncu-rep --quiet
+tachyon chat report.ncu-rep --no-ai
 ```
 
-只显示 CRITICAL 级别的发现，快速了解最严重的问题。
+使用纯规则模式快速分析，了解最严重的问题。
 
 ### 工作流 2：深入分析特定 Kernel
 
 ```bash
-tachyon chat report.ncu-rep --kernel "matmul*"
+tachyon chat report.ncu-rep
 ```
 
 进入 chat 会话后：

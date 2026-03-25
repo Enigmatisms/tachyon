@@ -126,7 +126,7 @@ def create_backend(
     """Create an LLMBackend from configuration.
 
     Args:
-        provider: Backend provider name ("openai", "anthropic", "litellm").
+        provider: Backend provider name ("openai", "anthropic").
         model: Model identifier (e.g. "gpt-4o", "claude-sonnet-4-20250514").
         api_key: API key (if None, backends read from env).
         base_url: Optional base URL for OpenAI-compatible endpoints.
@@ -142,11 +142,8 @@ def create_backend(
         case "anthropic":
             from .anthropic_backend import AnthropicBackend
             return AnthropicBackend(model=model, api_key=api_key, base_url=base_url, **kwargs)
-        case "litellm":
-            from .litellm_backend import LiteLLMBackend
-            return LiteLLMBackend(model=model, api_key=api_key, base_url=base_url, **kwargs)
         case _:
             raise ValueError(
                 f"Unknown LLM provider: {provider!r}. "
-                f"Supported: openai, anthropic, litellm"
+                f"Supported: openai, anthropic"
             )

@@ -27,17 +27,6 @@ NEVER fabricate metrics, source code, or SASS instructions.
 - Numbered recommendations with priority (HIGH/MEDIUM/LOW).
 - Be token-efficient."""
 
-AGENT_IDENTITY = {
-    "name": "Tachyon",
-    "role": "CUDA/HPC Performance Analysis Expert",
-    "expertise": [
-        "NVIDIA GPU microarchitecture",
-        "CUDA kernel optimization",
-        "SASS/PTX instruction analysis",
-        "Source-to-assembly correlation",
-    ],
-}
-
 
 def _build_tool_catalog(registry: ToolRegistry) -> str:
     """Build compact one-line-per-tool catalog from registry."""
@@ -103,14 +92,6 @@ def _lang_prefix() -> str:
     if not instruction:
         return ""
     return f"[Language] {instruction}\n\n"
-
-
-def _lang_instruction() -> str:
-    """Append a language instruction based on current i18n setting.
-
-    DEPRECATED: use _lang_prefix() instead. Kept for backward compat.
-    """
-    return _lang_prefix()
 
 
 def build_kernel_context(kernels: list) -> str:

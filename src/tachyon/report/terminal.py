@@ -79,15 +79,6 @@ class TerminalReporter:
 
         return buf.getvalue()
 
-    def render_single_kernel(
-        self, report: KernelReport, findings: list[Finding]
-    ) -> str:
-        """Convenience: render just one kernel to a string."""
-        buf = StringIO()
-        console = Console(file=buf, force_terminal=True, width=120)
-        self._render_kernel(console, report, findings)
-        return buf.getvalue()
-
     def _render_kernel(
         self, console: Console, report: KernelReport, findings: list[Finding]
     ) -> None:

@@ -77,7 +77,7 @@ def register_analysis_tools(registry: ToolRegistry, ctx: SessionContext) -> None
         name="run_analysis",
         description=(
             "Run Tachyon's rule-based analyzers on a kernel. "
-            "Without analyzer_name, runs all (Roofline, Memory, WarpStall, NvRules). "
+            "Without analyzer_name, runs all (Roofline, Memory, WarpStall, etc.). "
             "Returns structured Findings with severity and recommendations."
         ),
         parameters={
@@ -89,7 +89,7 @@ def register_analysis_tools(registry: ToolRegistry, ctx: SessionContext) -> None
                 },
                 "analyzer_name": {
                     "type": "string",
-                    "description": "Optional: roofline, memory, warp_stall, nvrules.",
+                    "description": "Optional: roofline, memory, warp_stall, occupancy, instruction, launch.",
                 },
             },
             "required": ["kernel_id"],

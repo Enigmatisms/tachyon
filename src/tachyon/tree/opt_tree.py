@@ -10,8 +10,29 @@ inspects raw NCU metric values.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Any
+
 from tachyon.models.finding import Finding, Severity
-from tachyon.models.opt_tree import OptimizationNode
+
+
+@dataclass
+class OptimizationNode:
+    """A node in the Optimization Tree.
+
+    Each node represents either a strategy category (internal node) or a
+    concrete optimisation action (leaf).
+    """
+
+    strategy_name: str
+    category: str  # "compute", "memory", "latency", "load-balancing", "balanced", "root"
+    description: str = ""
+    applicable: bool = False
+    pruned: bool = False
+    pruned_reason: str | None = None
+    estimated_speedup: float | None = None
+    children: list[OptimizationNode] = field(default_factory=list)
+    evidence: list[Any] = field(default_factory=list)
 
 # ---------------------------------------------------------------------------
 # Bottleneck classification constants

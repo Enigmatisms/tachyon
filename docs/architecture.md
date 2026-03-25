@@ -8,9 +8,9 @@ Tachyon 采用八层栈式架构，每一层只依赖它下面的层，上层对
 
 ```
 src/tachyon/
-├── cli/            # 命令行入口（analyze / chat / profile / diff / serve）
+├── cli/            # 命令行入口（chat / profile / diff / evolve / serve）
 ├── agent/          # Agent 循环、系统提示词、上下文压缩
-├── llm/            # LLM 后端适配（OpenAI / Anthropic / LiteLLM）
+├── llm/            # LLM 后端适配（OpenAI / Anthropic）
 ├── tools/          # 9 个 Agent 可调用工具 + ToolRegistry
 ├── server/         # MCP stdio 服务
 ├── analyzers/      # 7 个规则分析器 + 插件式注册
@@ -34,7 +34,7 @@ src/tachyon/
 graph TD
     L8["<b>Layer 8 · CLI / Chat UI</b><br/>Click 命令 · Rich 终端 · 流式输出"]
     L7["<b>Layer 7 · Agent Loop</b><br/>多轮 LLM 编排（≤10 轮）· 工具调度<br/>Token 追踪 · Auto-Fallback"]
-    L6["<b>Layer 6 · LLM Backends</b><br/>OpenAI / Anthropic / LiteLLM<br/>流式响应 · tool-call 解析"]
+    L6["<b>Layer 6 · LLM Backends</b><br/>OpenAI / Anthropic<br/>流式响应 · tool-call 解析"]
     L5["<b>Layer 5 · Tools × 9</b><br/>数据查询 4 · 源码 3 · 分析 2<br/>JSON Schema 定义"]
     L4["<b>Layer 4 · Analyzers × 7</b><br/>Roofline · Memory · Occupancy · Instruction<br/>Launch · Warp Stall · NCU Rules<br/>插件注册 AnalyzerRegistry"]
     L3["<b>Layer 3 · Correlator</b><br/>NCU 指标 ↔ CUDA 源码 ↔ SASS 汇编<br/>双阈值热点检测"]
@@ -70,7 +70,7 @@ graph TD
 
 **Layer 8 — 用户接口**
 
-- `cli/` — 五个 Click 命令：`analyze`、`chat`、`profile`、`diff`、`serve`
+- `cli/` — 四个 Click 命令：`chat`、`profile`、`diff`、`serve`（加上 `evolve` 子命令）
 - `server/` — MCP stdio 服务端，把 9 个工具暴露为 MCP Tool，处理调用分发
 
 **Layer 7 — Agent 编排**
@@ -81,7 +81,7 @@ graph TD
 
 **Layer 6 — LLM 后端**
 
-- `llm/` — 抽象基类 `LLMBackend`（`chat_completion()` + 流式），OpenAI / Anthropic / LiteLLM 三种实现，工厂函数 `create_backend(config)` 按配置创建
+- `llm/` — 抽象基类 `LLMBackend`（`chat_completion()` + 流式），OpenAI / Anthropic 两种实现，工厂函数 `create_backend(config)` 按配置创建
 
 **Layer 5 — 工具层**
 
@@ -118,7 +118,7 @@ graph TD
 
 ## 数据流
 
-### 规则分析（analyze 命令）
+### 规则分析（profile --no-ai 模式）
 
 ```mermaid
 graph LR

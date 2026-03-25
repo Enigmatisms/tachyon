@@ -4,6 +4,11 @@ from tachyon.models.kernel import KernelReport
 from tachyon.report.terminal import TerminalReporter
 
 
+def _render_one(reporter: TerminalReporter, report: KernelReport, findings) -> str:
+    """Render a single kernel through the standard render() API."""
+    return reporter.render([report], {report.demangled_name: findings})
+
+
 class TestTerminalReporter:
     def test_render_single_kernel(self, report_compute_bound: KernelReport):
         """Render a single kernel with findings."""
@@ -17,14 +22,14 @@ class TestTerminalReporter:
             ),
         ]
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_compute_bound, findings)
+        output = _render_one(reporter, report_compute_bound, findings)
         assert "compute_kernel" in output
         assert "compute-bound" in output
 
     def test_render_no_findings(self, report_minimal: KernelReport):
         """Render a kernel with no findings shows 'no significant findings'."""
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_minimal, [])
+        output = _render_one(reporter, report_minimal, [])
         assert "No significant findings" in output or "no significant" in output.lower()
 
     def test_render_multiple_kernels(
@@ -61,7 +66,7 @@ class TestTerminalReporter:
                     detail="d", action="a", source="s"),
         ]
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_latency_bound, findings)
+        output = _render_one(reporter, report_latency_bound, findings)
         assert "Key Findings" in output
         assert "CRITICAL" in output
 
@@ -72,14 +77,14 @@ class TestTerminalReporter:
                     detail="Test detail", action="Test action", source="test_src"),
         ]
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_compute_bound, findings)
+        output = _render_one(reporter, report_compute_bound, findings)
         assert "Test finding" in output
         assert "test_src" in output
 
     def test_render_kernel_header(self, report_compute_bound: KernelReport):
         """Kernel header should show grid, block, registers."""
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_compute_bound, [
+        output = _render_one(reporter, report_compute_bound, [
             Finding(severity=Severity.INFO, title="t", detail="d", action="a", source="s"),
         ])
         assert "4096" in output  # grid size
@@ -93,6 +98,6 @@ class TestTerminalReporter:
                     detail="d", action="A" * 200, source="s"),
         ]
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_compute_bound, findings)
+        output = _render_one(reporter, report_compute_bound, findings)
         # Action text should appear in the output
         assert "AAAA" in output

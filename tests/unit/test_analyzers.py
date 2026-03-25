@@ -174,57 +174,12 @@ class TestWarpStallAnalyzer:
         assert len(metric_findings) >= 1
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━ NvRulesAdapter ━━━━━━━━━━━━━━━━━━━━━━
-
-
-class TestNvRulesAdapter:
-    def test_converts_rules_to_findings(self, report_with_rules: KernelReport):
-        """NvRulesAdapter should convert rule results to findings."""
-        from tachyon.analyzers.nvrules import NvRulesAdapter
-        adapter = NvRulesAdapter()
-        assert adapter.can_run(report_with_rules)
-        findings = adapter.analyze(report_with_rules)
-        # Should skip OK rules, keep LOW/MED/HIGH = 3 findings
-        assert len(findings) == 3
-
-    def test_severity_mapping(self, report_with_rules: KernelReport):
-        """Verify severity mapping: LOW->INFO, MED->WARNING, HIGH->CRITICAL."""
-        from tachyon.analyzers.nvrules import NvRulesAdapter
-        findings = NvRulesAdapter().analyze(report_with_rules)
-        # HIGH -> CRITICAL
-        high_findings = [f for f in findings if "ComputeWorkload" in f.title]
-        assert len(high_findings) == 1
-        assert high_findings[0].severity == Severity.CRITICAL
-        # MED -> WARNING
-        med_findings = [f for f in findings if "MemoryWorkload" in f.title]
-        assert len(med_findings) == 1
-        assert med_findings[0].severity == Severity.WARNING
-
-    def test_skips_ok_rules(self, report_with_rules: KernelReport):
-        """OK rules should be skipped."""
-        from tachyon.analyzers.nvrules import NvRulesAdapter
-        findings = NvRulesAdapter().analyze(report_with_rules)
-        ok_findings = [f for f in findings if "SpeedOfLight" in f.title]
-        assert len(ok_findings) == 0
-
-    def test_cannot_run_no_rules(self, report_minimal: KernelReport):
-        from tachyon.analyzers.nvrules import NvRulesAdapter
-        assert not NvRulesAdapter().can_run(report_minimal)
-
-    def test_source_label(self, report_with_rules: KernelReport):
-        """Source field should be the adapter name."""
-        from tachyon.analyzers.nvrules import NvRulesAdapter
-        findings = NvRulesAdapter().analyze(report_with_rules)
-        for f in findings:
-            assert f.source == "nvrules"
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━ AnalyzerRegistry ━━━━━━━━━━━━━━━━━━━━
 
 
 class TestAnalyzerRegistry:
     def test_auto_register(self):
-        """auto_register should add 6 analyzers (NvRules excluded by default)."""
+        """auto_register should add 6 analyzers."""
         from tachyon.analyzers.base import AnalyzerRegistry
         registry = AnalyzerRegistry()
         registry.auto_register()
@@ -258,14 +213,6 @@ class TestAnalyzerRegistry:
         sources = {f.source for f in findings}
         assert "roofline" in sources
         assert "warp_stall" in sources
-
-    def test_run_all_with_rules(self, report_with_rules: KernelReport):
-        from tachyon.analyzers.base import AnalyzerRegistry
-        registry = AnalyzerRegistry()
-        registry.auto_register(include_nvrules=True)
-        findings = registry.run_all(report_with_rules)
-        nvrule_findings = [f for f in findings if f.source == "nvrules"]
-        assert len(nvrule_findings) > 0
 
     def test_fault_isolation(self, report_compute_bound: KernelReport):
         """A broken analyzer should not block others from running."""
@@ -306,7 +253,7 @@ class TestAnalyzerRegistry:
         findings = registry.run_all(report_minimal)
         metric_analyzer_findings = [
             f for f in findings
-            if f.source in ("roofline", "memory", "warp_stall", "nvrules")
+            if f.source in ("roofline", "memory", "warp_stall")
         ]
         assert len(metric_analyzer_findings) == 0
 

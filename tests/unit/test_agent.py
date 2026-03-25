@@ -24,7 +24,6 @@ from tachyon.agent.loop import (
     run_agent_loop,
 )
 from tachyon.agent.persona import (
-    AGENT_IDENTITY,
     build_kernel_context,
     build_lean_system_prompt,
     build_system_prompt,
@@ -724,18 +723,6 @@ class TestPrependLangHint:
 # ---------------------------------------------------------------------------
 
 class TestPersona:
-    def test_agent_identity_has_expected_fields(self):
-        assert "name" in AGENT_IDENTITY
-        assert AGENT_IDENTITY["name"] == "Tachyon"
-        assert "role" in AGENT_IDENTITY
-        assert "expertise" in AGENT_IDENTITY
-        assert isinstance(AGENT_IDENTITY["expertise"], list)
-        assert len(AGENT_IDENTITY["expertise"]) > 0
-
-    def test_agent_identity_expertise_contains_cuda(self):
-        expertise_str = " ".join(AGENT_IDENTITY["expertise"]).lower()
-        assert "cuda" in expertise_str
-
     def test_build_system_prompt_loads_template(self):
         """build_system_prompt should produce a string containing persona.md content."""
         registry = _make_registry(_dummy_tool_def("list_kernels", "List all kernels in the report."))

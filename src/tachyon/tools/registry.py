@@ -94,21 +94,6 @@ class ToolRegistry:
         """Return all registered tool names."""
         return list(self._tools.keys())
 
-    def categories(self) -> list[str]:
-        """Return sorted list of unique tool categories."""
-        return sorted({t.category for t in self._tools.values()})
-
-    def tools_by_category(self) -> dict[str, list[ToolDefinition]]:
-        """Return tools grouped by category."""
-        groups: dict[str, list[ToolDefinition]] = {}
-        for t in self._tools.values():
-            groups.setdefault(t.category, []).append(t)
-        return groups
-
-    def tool_count(self) -> int:
-        """Return the number of registered tools."""
-        return len(self._tools)
-
     def filter(self, names: set[str]) -> ToolRegistry:
         """Return a new registry containing only the named tools.
 

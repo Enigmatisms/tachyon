@@ -60,7 +60,7 @@ ncu_path = "/custom/ncu"
 class TestEnvOverride:
     def test_env_overrides(self):
         env = {
-            "TACHYON_LLM_PROVIDER": "litellm",
+            "TACHYON_LLM_PROVIDER": "anthropic",
             "TACHYON_MODEL": "gpt-4-turbo",
             "TACHYON_LANG": "zh",
             "TACHYON_DEPTH": "radical",
@@ -68,7 +68,7 @@ class TestEnvOverride:
         with patch.dict(os.environ, env, clear=False):
             cfg = TachyonConfig()
             cfg._apply_env()
-            assert cfg.llm.provider == "litellm"
+            assert cfg.llm.provider == "anthropic"
             assert cfg.llm.model == "gpt-4-turbo"
             assert cfg.output.lang == "zh"
             assert cfg.profiling.depth == "radical"
@@ -136,11 +136,11 @@ class TestPriorityOrder:
     def test_env_overrides_toml(self, tmp_path: Path):
         """Environment variables should override TOML config."""
         config_file = tmp_path / "config.toml"
-        config_file.write_text('[llm]\nprovider = "anthropic"\n')
+        config_file.write_text('[llm]\nprovider = "openai"\n')
 
-        with patch.dict(os.environ, {"TACHYON_LLM_PROVIDER": "litellm"}):
+        with patch.dict(os.environ, {"TACHYON_LLM_PROVIDER": "anthropic"}):
             cfg = TachyonConfig.load(config_file)
-            assert cfg.llm.provider == "litellm"
+            assert cfg.llm.provider == "anthropic"
 
     def test_cli_overrides_env(self, tmp_path: Path):
         """CLI should override environment variables."""

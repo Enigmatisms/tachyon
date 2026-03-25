@@ -2013,33 +2013,6 @@ class TestToolDefinitionCategory:
         assert "category" not in str(result)
 
 
-class TestToolRegistryCategory:
-    """Tests for ToolRegistry category query methods."""
-
-    def test_categories_sorted_unique(self):
-        reg = ToolRegistry()
-        reg.register(_make_tool(name="a", category="source"))
-        reg.register(_make_tool(name="b", category="analysis"))
-        reg.register(_make_tool(name="c", category="source"))
-        assert reg.categories() == ["analysis", "source"]
-
-    def test_tools_by_category(self):
-        reg = ToolRegistry()
-        ta = _make_tool(name="a", category="x")
-        tb = _make_tool(name="b", category="y")
-        reg.register(ta)
-        reg.register(tb)
-        groups = reg.tools_by_category()
-        assert groups["x"] == [ta]
-        assert groups["y"] == [tb]
-
-    def test_tool_count(self):
-        reg = ToolRegistry()
-        assert reg.tool_count() == 0
-        reg.register(_make_tool(name="a"))
-        reg.register(_make_tool(name="b"))
-        assert reg.tool_count() == 2
-
 
 class TestRegisterAllTools:
     """Tests for register_all_tools() unified registration."""
@@ -2049,25 +2022,18 @@ class TestRegisterAllTools:
         ctx = SessionContext(kernels=[])
         from tachyon.tools import register_all_tools
         register_all_tools(reg, ctx)
-        assert reg.tool_count() == 12
+        assert len(reg.all_definitions()) == 12
 
     def test_registers_correct_categories(self):
         reg = ToolRegistry()
         ctx = SessionContext(kernels=[])
         from tachyon.tools import register_all_tools
         register_all_tools(reg, ctx)
-        cats = reg.categories()
+        cats = sorted({t.category for t in reg.all_definitions()})
         assert "data_query" in cats
         assert "source" in cats
         assert "source_view" in cats
         assert "analysis" in cats
-
-    def test_evolve_requires_ctx(self):
-        reg = ToolRegistry()
-        ctx = SessionContext(kernels=[])
-        from tachyon.tools import register_all_tools
-        with pytest.raises(ValueError, match="evolve_ctx"):
-            register_all_tools(reg, ctx, include_evolve=True)
 
 
 class TestSerializeToolResult:

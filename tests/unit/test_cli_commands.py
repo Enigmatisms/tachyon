@@ -21,15 +21,8 @@ class TestCLICommands:
         """tachyon --help lists all subcommands."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        assert "analyze" in result.output
         assert "chat" in result.output
         assert "profile" in result.output
-
-    def test_analyze_help(self, runner):
-        """tachyon analyze --help shows options."""
-        result = runner.invoke(app, ["analyze", "--help"])
-        assert result.exit_code == 0
-        assert "--format" in result.output or "REPORT" in result.output
 
     def test_chat_help(self, runner):
         """tachyon chat --help shows options."""
@@ -55,14 +48,8 @@ class TestCLICommands:
         assert result.exit_code == 0
         assert "BEFORE" in result.output or "before" in result.output.lower()
 
-    def test_analyze_missing_file(self, runner):
-        """tachyon analyze nonexistent.ncu-rep shows error."""
-        result = runner.invoke(app, ["analyze", "nonexistent.ncu-rep"])
-        # Should fail gracefully (nonzero exit or error message)
-        assert result.exit_code != 0 or "error" in result.output.lower() or "not" in result.output.lower()
-
     def test_main_no_args(self, runner):
         """tachyon with no args shows usage (Click returns exit code 0 or 2)."""
         result = runner.invoke(app, [])
         assert result.exit_code in (0, 2)
-        assert "Usage" in result.output or "analyze" in result.output
+        assert "Usage" in result.output

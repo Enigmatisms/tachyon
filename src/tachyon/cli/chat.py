@@ -151,7 +151,7 @@ class _EvolveState:
     default=None,
     help="LLM model (e.g. gpt-4o, claude-sonnet-4-20250514)",
 )
-@click.option("--provider", "-p", default=None, help="LLM provider (openai/anthropic/litellm)")
+@click.option("--provider", "-p", default=None, help="LLM provider (openai/anthropic)")
 @click.option("--no-ai", is_flag=True, help="Force Rule-Only mode (no LLM)")
 @click.option("--kernel", "-k", default=None, help="Filter kernels by name (glob pattern, e.g. 'matmul*').")
 @click.option("--lang", default=None, help="Language (en/zh)")
