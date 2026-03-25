@@ -188,13 +188,11 @@ class TestIsSummaryText:
         assert _is_summary_text("First let's analyze.") is False
 
     def test_rejects_reasoning_phrases(self) -> None:
-        assert _is_summary_text("The WMMA approach needs half-precision input.") is False
-        assert _is_summary_text("The optimization has a correctness bug.") is False
         assert _is_summary_text("My approach was fundamentally wrong.") is False
-        assert _is_summary_text("This approach requires FP16 inputs.") is False
         assert _is_summary_text("However, the kernel uses float.") is False
         assert _is_summary_text("Unfortunately, this broke correctness.") is False
         assert _is_summary_text("Looking at the error output.") is False
+        assert _is_summary_text("Since the kernel is memory-bound.") is False
 
     def test_accepts_summary_text(self) -> None:
         assert _is_summary_text(
@@ -202,6 +200,9 @@ class TestIsSummaryText:
         ) is True
         assert _is_summary_text(
             "Replaced global memory loads with coalesced access."
+        ) is True
+        assert _is_summary_text(
+            "The optimization reduced global memory accesses by 4x."
         ) is True
         assert _is_summary_text(
             "使用共享内存分块技术优化了矩阵乘法。"

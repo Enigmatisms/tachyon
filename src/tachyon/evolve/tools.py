@@ -33,6 +33,119 @@ _ALLOWED_COMMANDS = frozenset({
 # H2: build_success field name for experiment tracking
 _BUILD_SUCCESS_FIELD = "build_success"
 
+# Error keywords for filtering compile output
+_ERROR_KEYWORDS = frozenset({"error", "undefined", "undeclared", "expected", "fatal"})
+
+# --- Diff Safety Scanner ---
+
+# Synchronization primitives whose removal almost always causes race conditions
+_SYNC_PRIMITIVES = (
+    "__syncthreads", "__syncwarp", "__threadfence",
+    "cooperative_groups::sync", "cg::sync",
+)
+
+# Signal names for human-readable crash descriptions
+_SIGNAL_NAMES: dict[int, str] = {
+    139: "SIGSEGV (segfault)",
+    134: "SIGABRT (abort)",
+    136: "SIGFPE (arithmetic error)",
+    137: "SIGKILL (killed)",
+}
+
+
+def _scan_diff_safety(old_content: str, new_content: str) -> list[str]:
+    """Analyze code changes for common CUDA safety issues.
+
+    Returns a list of human-readable warnings. Empty list = no issues detected.
+    Runs on raw text (no AST), so it's fast and zero-dependency.
+    """
+    warnings: list[str] = []
+    old_lines = old_content.splitlines()
+    new_lines = new_content.splitlines()
+    removed = {ln.strip() for ln in old_lines} - {ln.strip() for ln in new_lines}
+    added = {ln.strip() for ln in new_lines} - {ln.strip() for ln in old_lines}
+
+    # 1. Removed synchronization primitives
+    for line in removed:
+        for prim in _SYNC_PRIMITIVES:
+            if prim in line and not any(prim in a for a in added):
+                warnings.append(
+                    f"Removed '{prim}' without replacement — likely race condition."
+                )
+                break  # one warning per removed line
+
+    # 2. Shared memory size changed
+    import re as _re
+    old_shared = _re.findall(r'__shared__\s+\w+\s+(\w+)\s*\[([^\]]+)\]', old_content)
+    new_shared = _re.findall(r'__shared__\s+\w+\s+(\w+)\s*\[([^\]]+)\]', new_content)
+    old_map = {name: size for name, size in old_shared}
+    new_map = {name: size for name, size in new_shared}
+    for name in old_map:
+        if name in new_map and old_map[name] != new_map[name]:
+            warnings.append(
+                f"Shared memory '{name}' size changed "
+                f"({old_map[name]} → {new_map[name]}) — verify all indexing matches."
+            )
+
+    # 3. Removed bounds guards (if idx < N pattern)
+    guard_pat = _re.compile(r'if\s*\(.*(?:threadIdx|blockIdx|idx|tid)\b.*[<>]=?\s*\w+')
+    removed_guards = [ln for ln in removed if guard_pat.search(ln)]
+    added_guards = [ln for ln in added if guard_pat.search(ln)]
+    if removed_guards and not added_guards:
+        warnings.append(
+            f"Removed {len(removed_guards)} bounds guard(s) — risk of out-of-bounds access."
+        )
+
+    return warnings
+
+
+def _classify_crash(exit_code: int, output: str) -> str:
+    """Classify a runtime crash into a concise pattern string."""
+    sig = _SIGNAL_NAMES.get(exit_code, "")
+    out_lower = output.lower()
+
+    if exit_code == 139 or "segfault" in out_lower or "sigsegv" in out_lower:
+        return "SIGSEGV — out-of-bounds memory access"
+    if "illegal memory access" in out_lower or "misaligned address" in out_lower:
+        return "CUDA illegal memory access — check array indexing and shared memory size"
+    if "an illegal instruction" in out_lower:
+        return "CUDA illegal instruction — possible type mismatch or uninitialized memory"
+    if "launch failed" in out_lower or "launch timed out" in out_lower:
+        return "CUDA kernel launch failure — check grid/block dimensions and resource usage"
+    if "assert" in out_lower:
+        return "Assertion failure — correctness check violated"
+    if exit_code == 134:
+        return "SIGABRT — assertion or CUDA error handler triggered"
+    if sig:
+        return sig
+    return f"exit code {exit_code}"
+
+
+def _filter_compile_errors(output: str, max_lines: int = 8) -> str:
+    """Extract the most relevant compile error lines.
+
+    Shows the first 5 and last 3 error lines, with a count in between.
+    This reduces token waste from cascading errors.
+    """
+    lines = output.splitlines()
+    error_lines = [
+        ln for ln in lines
+        if any(kw in ln.lower() for kw in _ERROR_KEYWORDS)
+        and len(ln.strip()) > 5
+    ]
+    if not error_lines:
+        # No recognized error lines — return tail of output
+        return "\n".join(lines[-max_lines:])
+    if len(error_lines) <= max_lines:
+        return "\n".join(error_lines)
+    head = error_lines[:5]
+    tail = error_lines[-3:]
+    remaining = len(error_lines) - 8
+    label = "error" if remaining == 1 else "errors"
+    return "\n".join(
+        head + [f"... ({remaining} more {label})"] + tail
+    )
+
 
 def _validate_command(cmd_str: str) -> str | None:
     """Validate that the first token of the command is in the allowlist.
@@ -101,13 +214,28 @@ def register_evolve_tools(
         Before editing, a git snapshot and file backup are created.
         """
         try:
-            if ctx.edit_locked:
+            if ctx.iteration_doomed:
+                return ToolResult.fail(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Iteration terminated due to repeated failures. "
+                    "Output [SUMMARY] and stop.",
+                )
+
+            if ctx.edit_locked and ctx.benchmark_fix_allowed <= 0:
                 return ToolResult.fail(
                     ErrorCode.INVALID_ARGUMENT,
                     "No edits allowed — compile already succeeded, "
                     "this iteration is past the editing phase.",
                     "Proceed to: run_benchmark → reprofile → compare_metrics. "
                     "New ideas go to the NEXT iteration.",
+                )
+
+            # If this is a benchmark-fix edit, consume the allowance
+            if ctx.edit_locked and ctx.benchmark_fix_allowed > 0:
+                ctx.benchmark_fix_allowed -= 1
+                _log.info(
+                    "Benchmark-fix edit allowed (%d remaining)",
+                    ctx.benchmark_fix_allowed,
                 )
 
             allowed = ctx.allowed_source_paths
@@ -136,42 +264,43 @@ def register_evolve_tools(
             current_content = filepath.read_text(encoding="utf-8")
 
             if old_content not in current_content:
-                ctx.edit_fail_count += 1
-                # Return first 5 lines as hint so LLM can fix the match
-                hint_lines = current_content.splitlines()[:5]
-                hint = "\n".join(hint_lines)
-                suggestion = (
-                    "You MUST call read_source_file first to get the CURRENT "
-                    "content, then use the EXACT text from read_source_file as "
-                    f"old_content.\nCurrent file starts with:\n{hint}"
-                )
-                if ctx.edit_fail_count >= 3:
-                    suggestion += (
-                        f"\n\nFATAL: Edit failed {ctx.edit_fail_count} times. "
-                        "STOP editing — call compile_kernel if you have pending "
-                        "successful edits, or STOP this iteration."
+                # Fallback: try fuzzy match by first/last line
+                fuzzy_replacement = _fuzzy_match(old_content, new_content, current_content)
+                if fuzzy_replacement is not None:
+                    new_file_content = fuzzy_replacement
+                else:
+                    ctx.edit_fail_count += 1
+                    # Return first 10 lines as hint so LLM can fix the match
+                    hint_lines = current_content.splitlines()[:10]
+                    hint = "\n".join(hint_lines)
+                    suggestion = (
+                        "IMPORTANT: Use the 'raw_text' field from read_source_file as "
+                        "old_content. Do NOT reconstruct text from the 'lines' array — "
+                        "this causes whitespace mismatches.\n\n"
+                        f"Current file starts with:\n{hint}"
                     )
-                return ToolResult.fail(
-                    ErrorCode.INVALID_ARGUMENT,
-                    "old_content does not match any section in the file. "
-                    "The file may have been modified since you last read it.",
-                    suggestion,
-                )
+                    if ctx.edit_fail_count >= 3:
+                        suggestion += (
+                            f"\n\nFATAL: Edit failed {ctx.edit_fail_count} times. "
+                            "STOP editing — call compile_kernel if you have pending "
+                            "successful edits, or STOP this iteration."
+                        )
+                    return ToolResult.fail(
+                        ErrorCode.INVALID_ARGUMENT,
+                        "old_content does not match any section in the file. "
+                        "The file may have been modified since you last read it.",
+                        suggestion,
+                    )
+            else:
+                # Exact match — standard replace
+                new_file_content = current_content.replace(old_content, new_content, 1)
 
-            # Count occurrences
-            occurrences = current_content.count(old_content)
-            ctx.edit_fail_count = 0  # Reset on successful match
-            if occurrences > 1:
-                _log.warning(
-                    "old_content matches %d times in %s. Using first match.",
-                    occurrences, resolved,
-                )
+            ctx.edit_fail_count = 0  # Reset on successful match (exact or fuzzy)
 
             # Record change in current experiment
             from .models import CodeChange
 
-            # Apply edit
-            new_file_content = current_content.replace(old_content, new_content, 1)
+            # Write the edited file
             filepath.write_text(new_file_content, encoding="utf-8")
 
             diff = CodeChange.compute_diff(current_content, new_file_content)
@@ -203,9 +332,14 @@ def register_evolve_tools(
                 "lines_changed": lines,
                 "diff": diff[:2000],
             }
-            if occurrences > 1:
-                result_data["warning"] = (
-                    f"old_content matched {occurrences} times; used first match."
+
+            # Safety scan: detect dangerous CUDA patterns in the diff
+            safety_warnings = _scan_diff_safety(old_content, new_content)
+            if safety_warnings:
+                result_data["safety_warnings"] = safety_warnings
+                result_data["next_step"] = (
+                    "SAFETY WARNINGS detected — review them before calling "
+                    "compile_kernel. Fix issues with another edit if needed."
                 )
 
             return ToolResult.ok(result_data)
@@ -230,7 +364,12 @@ def register_evolve_tools(
                 },
                 "old_content": {
                     "type": "string",
-                    "description": "Exact content block to replace. Must match current file.",
+                    "description": (
+                        "Exact content block to replace. Must match current file content. "
+                        "IMPORTANT: Always copy old_content from the 'raw_text' field "
+                        "returned by read_source_file — do NOT reconstruct text from "
+                        "the 'lines' array, as this causes whitespace mismatches."
+                    ),
                 },
                 "new_content": {
                     "type": "string",
@@ -244,6 +383,7 @@ def register_evolve_tools(
             "required": ["file", "old_content", "new_content"],
         },
         handler=edit_source_file,
+        category="evolve",
     ))
 
     # --- 2. compile_kernel ---
@@ -253,6 +393,13 @@ def register_evolve_tools(
     ) -> ToolResult:
         """Compile the project using the configured build command."""
         try:
+            if ctx.iteration_doomed:
+                return ToolResult.fail(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Iteration terminated due to repeated failures. "
+                    "Output [SUMMARY] and stop.",
+                )
+
             is_default = build_cmd is None
             cmd_str = build_cmd or ctx.config.build_cmd
             if not cmd_str:
@@ -308,7 +455,7 @@ def register_evolve_tools(
             if success:
                 error_output = result.stderr.strip()
                 ctx.compile_fail_count = 0
-                ctx.edit_locked = True  # Compile succeeded — editing phase is over  # Reset on success
+                ctx.edit_locked = True  # Compile succeeded — editing phase is over
             else:
                 # Combine stderr + last 50 lines of stdout for context
                 error_output = result.stderr.strip()
@@ -327,34 +474,34 @@ def register_evolve_tools(
                 record.comparison = record.comparison or {}
                 record.comparison[_BUILD_SUCCESS_FIELD] = success
 
-            # After 2 consecutive failures, signal iteration end
+            # After 2 consecutive failures, hard-refuse further attempts
             if ctx.compile_fail_count >= 2:
-                return ToolResult.ok({
-                    "success": False,
-                    "exit_code": result.returncode,
-                    "elapsed_sec": round(elapsed, 1),
-                    "error_output": error_output[:3000],
-                    "build_cmd_used": cmd_str,
-                    "cwd": str(ctx.git.repo_root),
-                    "FATAL": (
-                        f"Build failed {ctx.compile_fail_count} times. "
-                        "Do NOT call compile_kernel() or edit_source_file() again "
-                        "— this iteration cannot be saved."
-                    ),
-                })
+                ctx.iteration_doomed = True
+                return ToolResult.fail(
+                    ErrorCode.INVALID_ARGUMENT,
+                    f"BLOCKED: Build failed {ctx.compile_fail_count} consecutive "
+                    "times. This iteration cannot be saved. "
+                    "Do NOT call compile_kernel or edit_source_file again.",
+                    "Output [SUMMARY] describing what you tried and why it failed, "
+                    "then STOP.",
+                )
 
             result_data: dict[str, Any] = {
                 "success": success,
                 "exit_code": result.returncode,
                 "elapsed_sec": round(elapsed, 1),
-                "error_output": error_output[:3000],
+                "error_output": (
+                    _filter_compile_errors(error_output) if not success
+                    else error_output[:1000]
+                ),
                 "build_cmd_used": cmd_str,
                 "cwd": str(ctx.git.repo_root),
                 "next_step": (
                     "run_benchmark → reprofile → compare_metrics"
                     if success else
-                    "Fix the source code error using edit_source_file, "
-                    "then call compile_kernel() with no arguments."
+                    "Read the error carefully. Fix ONLY the specific error "
+                    "with edit_source_file, then call compile_kernel() "
+                    "with no arguments. Do NOT rewrite large sections."
                 ),
             }
             # Warn LLM if custom build_cmd was used — the output binary
@@ -401,6 +548,7 @@ def register_evolve_tools(
             "required": [],
         },
         handler=compile_kernel,
+        category="evolve",
     ))
 
     # --- 3. run_benchmark ---
@@ -411,6 +559,13 @@ def register_evolve_tools(
     ) -> ToolResult:
         """Run the benchmark and parse performance metrics from output."""
         try:
+            if ctx.iteration_doomed:
+                return ToolResult.fail(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Iteration terminated due to repeated failures. "
+                    "Output [SUMMARY] and stop.",
+                )
+
             ctx.edit_locked = True
             is_default = run_cmd is None
             cmd_str = run_cmd or ctx.config.run_cmd
@@ -475,6 +630,15 @@ def register_evolve_tools(
 
             if result.returncode == 0:
                 ctx.run_fail_count = 0  # Reset on success
+            elif ctx.benchmark_fix_allowed > 0:
+                # Allow one fix edit after benchmark correctness failure
+                ctx.edit_locked = False
+                ctx.benchmark_fix_allowed -= 1
+                _log.info(
+                    "Benchmark failed (exit %d) — unlocked edit for fix "
+                    "(%d remaining)", result.returncode,
+                    ctx.benchmark_fix_allowed,
+                )
 
             return ToolResult.ok({
                 "exit_code": result.returncode,
@@ -486,9 +650,9 @@ def register_evolve_tools(
                 "next_step": (
                     "reprofile → compare_metrics"
                     if result.returncode == 0 else
-                    "Correctness broken (exit {}). Do NOT edit — testing phase "
-                    "started. This iteration will be rolled back. "
-                    "Try a different approach in the next iteration.".format(
+                    "Correctness broken (exit {}). You have ONE chance to fix it: "
+                    "call edit_source_file to fix the correctness bug only, then "
+                    "compile_kernel → run_benchmark → reprofile → compare_metrics.".format(
                         result.returncode,
                     )
                 ),
@@ -530,6 +694,7 @@ def register_evolve_tools(
             "required": [],
         },
         handler=run_benchmark,
+        category="evolve",
     ))
 
     # --- 4. reprofile ---
@@ -545,6 +710,13 @@ def register_evolve_tools(
         subsequent analysis tools see the updated metrics.
         """
         try:
+            if ctx.iteration_doomed:
+                return ToolResult.fail(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Iteration terminated due to repeated failures. "
+                    "Output [SUMMARY] and stop.",
+                )
+
             ctx.edit_locked = True
             from .models import MetricSnapshot
 
@@ -717,6 +889,7 @@ def register_evolve_tools(
             "required": [],
         },
         handler=reprofile,
+        category="evolve",
     ))
 
     # --- 5. compare_metrics ---
@@ -820,6 +993,7 @@ def register_evolve_tools(
             "required": [],
         },
         handler=compare_metrics,
+        category="evolve",
     ))
 
     # --- 6. get_evolve_status ---
@@ -884,12 +1058,78 @@ def register_evolve_tools(
             "properties": {},
         },
         handler=get_evolve_status,
+        category="evolve",
     ))
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _fuzzy_match(
+    old_content: str,
+    new_content: str,
+    current_content: str,
+    tolerance: int = 5,
+) -> str | None:
+    """Try to locate old_content in the file using first/last line anchoring.
+
+    When exact match fails (e.g., whitespace differences from LLM
+    reconstructing text from a lines array), this fallback:
+      1. Extracts the first and last non-empty line of old_content.
+      2. Finds the first line's position in the current file.
+      3. Verifies the last line appears within ±tolerance lines.
+      4. If matched, replaces the located region with new_content.
+
+    Returns the full new file content on success, or None if no match found.
+    """
+    old_lines = old_content.splitlines()
+    # Filter empty lines for anchors
+    non_empty = [l for l in old_lines if l.strip()]
+    if len(non_empty) < 2:
+        return None
+
+    first_anchor = non_empty[0].strip()
+    last_anchor = non_empty[-1].strip()
+
+    file_lines = current_content.splitlines()
+    # Find first anchor
+    start_idx = None
+    for i, line in enumerate(file_lines):
+        if line.strip() == first_anchor:
+            start_idx = i
+            break
+    if start_idx is None:
+        return None
+
+    # Find last anchor within tolerance
+    expected_range = len(old_lines) + tolerance
+    end_idx = None
+    for i in range(start_idx, min(start_idx + expected_range, len(file_lines))):
+        if file_lines[i].strip() == last_anchor:
+            end_idx = i
+            break
+    if end_idx is None:
+        return None
+
+    # Replace the located region
+    before = "\n".join(file_lines[:start_idx])
+    after = "\n".join(file_lines[end_idx + 1:])
+    parts = [before]
+    if before and not before.endswith("\n"):
+        parts.append("\n")
+    parts.append(new_content)
+    if after and not new_content.endswith("\n"):
+        parts.append("\n")
+    parts.append(after)
+    result = "".join(parts)
+
+    _log.info(
+        "Fuzzy match succeeded: lines %d-%d matched by first/last anchor",
+        start_idx + 1, end_idx + 1,
+    )
+    return result
+
 
 # Common benchmark output patterns
 _BENCHMARK_PATTERNS = [

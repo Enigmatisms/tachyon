@@ -215,12 +215,9 @@ def evolve(
     # --- Build analysis context ---
     from tachyon.analyzers.base import AnalyzerRegistry
     from tachyon.correlator.source_correlator import SourceCorrelator
-    from tachyon.tools.analysis import register_analysis_tools
+    from tachyon.tools import register_all_tools
     from tachyon.tools.context import SessionContext
-    from tachyon.tools.data_query import register_data_query_tools
     from tachyon.tools.registry import ToolRegistry
-    from tachyon.tools.source import register_source_tools
-    from tachyon.tools.source_view import register_source_view_tools
 
     analyzer_registry = AnalyzerRegistry()
     analyzer_registry.auto_register()
@@ -248,10 +245,7 @@ def evolve(
 
     # Create tool registry with all tools
     tool_registry = ToolRegistry()
-    register_data_query_tools(tool_registry, base_session)
-    register_source_tools(tool_registry, base_session)
-    register_source_view_tools(tool_registry, base_session)
-    register_analysis_tools(tool_registry, base_session)
+    register_all_tools(tool_registry, base_session)
 
     # LLM backend is required
     backend = _try_create_backend(config)

@@ -10,6 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -33,6 +34,7 @@ def _make_tool(
     description: str = "A test tool.",
     parameters: dict[str, Any] | None = None,
     handler: Any = None,
+    category: str = "general",
 ) -> ToolDefinition:
     """Convenience factory for ToolDefinition."""
     return ToolDefinition(
@@ -40,6 +42,7 @@ def _make_tool(
         description=description,
         parameters=parameters or {"type": "object", "properties": {}, "required": []},
         handler=handler,
+        category=category,
     )
 
 
@@ -1888,6 +1891,68 @@ class TestSourceViewTools:
         assert "#include" in data["lines"][0]["content"]
         assert "printf" in data["lines"][2]["content"]
 
+    @pytest.mark.asyncio
+    async def test_read_source_file_returns_raw_text(self):
+        """read_source_file result includes raw_text field with original text."""
+        file_content = "line one\nline two\nline three\n"
+        kernel = KernelReport(
+            kernel_name="test_raw",
+            demangled_name="test_raw",
+            launch_params=LaunchParams(
+                grid=(1, 1, 1), block=(256, 1, 1),
+                shared_mem_bytes=0, registers_per_thread=32,
+            ),
+            device_info=DeviceInfo(
+                name="TestGPU", compute_capability=(8, 0),
+                sm_count=108, max_clock_mhz=1410,
+                memory_bus_width=384, peak_memory_bandwidth_gbps=2039.0,
+            ),
+            source_files={"/raw_test.cu": file_content},
+        )
+        ctx = SessionContext(
+            kernels=[kernel],
+            allowed_source_paths={"/raw_test.cu"},
+        )
+        reg = ToolRegistry()
+        register_source_view_tools(reg, ctx)
+
+        result = await reg.execute("read_source_file", {"file": "/raw_test.cu"})
+        assert result.success is True
+        assert "raw_text" in result.data
+        assert result.data["raw_text"] == file_content
+
+    @pytest.mark.asyncio
+    async def test_read_source_file_raw_text_preserves_newlines(self):
+        """raw_text preserves original newlines (unlike rstripped lines array)."""
+        file_content = "  int x = 0;  \n\t\nint y = 1;\n"
+        kernel = KernelReport(
+            kernel_name="test_nl",
+            demangled_name="test_nl",
+            launch_params=LaunchParams(
+                grid=(1, 1, 1), block=(256, 1, 1),
+                shared_mem_bytes=0, registers_per_thread=32,
+            ),
+            device_info=DeviceInfo(
+                name="TestGPU", compute_capability=(8, 0),
+                sm_count=108, max_clock_mhz=1410,
+                memory_bus_width=384, peak_memory_bandwidth_gbps=2039.0,
+            ),
+            source_files={"/nl_test.cu": file_content},
+        )
+        ctx = SessionContext(
+            kernels=[kernel],
+            allowed_source_paths={"/nl_test.cu"},
+        )
+        reg = ToolRegistry()
+        register_source_view_tools(reg, ctx)
+
+        result = await reg.execute("read_source_file", {"file": "/nl_test.cu"})
+        assert result.success is True
+        raw = result.data["raw_text"]
+        # raw_text preserves trailing whitespace/newlines
+        assert "  int x = 0;  \n" in raw
+        assert "\t\n" in raw
+
     def test_build_allowed_source_paths_keeps_embedded(self):
         """build_allowed_source_paths keeps files with embedded content even when missing from disk."""
         import os
@@ -1916,3 +1981,126 @@ class TestSourceViewTools:
         assert os.path.abspath(__file__) in paths
         assert "/nonexistent/path.cu" in paths
         assert "/no/content.cu" not in paths
+
+
+# ━━━━━━━━━━━━━━━━━━━━ Test Category & Unified Registration ━━━━━━━━━
+
+
+class TestToolDefinitionCategory:
+    """Tests for ToolDefinition.category field."""
+
+    def test_category_defaults_to_general(self):
+        td = _make_tool()
+        assert td.category == "general"
+
+    def test_category_explicit(self):
+        td = _make_tool(category="analysis")
+        assert td.category == "analysis"
+
+    def test_category_not_in_openai_format(self):
+        td = _make_tool(category="data_query")
+        result = td.to_openai()
+        assert "category" not in str(result)
+
+    def test_category_not_in_anthropic_format(self):
+        td = _make_tool(category="source")
+        result = td.to_anthropic()
+        assert "category" not in str(result)
+
+    def test_category_not_in_mcp_format(self):
+        td = _make_tool(category="evolve")
+        result = td.to_mcp()
+        assert "category" not in str(result)
+
+
+class TestToolRegistryCategory:
+    """Tests for ToolRegistry category query methods."""
+
+    def test_categories_sorted_unique(self):
+        reg = ToolRegistry()
+        reg.register(_make_tool(name="a", category="source"))
+        reg.register(_make_tool(name="b", category="analysis"))
+        reg.register(_make_tool(name="c", category="source"))
+        assert reg.categories() == ["analysis", "source"]
+
+    def test_tools_by_category(self):
+        reg = ToolRegistry()
+        ta = _make_tool(name="a", category="x")
+        tb = _make_tool(name="b", category="y")
+        reg.register(ta)
+        reg.register(tb)
+        groups = reg.tools_by_category()
+        assert groups["x"] == [ta]
+        assert groups["y"] == [tb]
+
+    def test_tool_count(self):
+        reg = ToolRegistry()
+        assert reg.tool_count() == 0
+        reg.register(_make_tool(name="a"))
+        reg.register(_make_tool(name="b"))
+        assert reg.tool_count() == 2
+
+
+class TestRegisterAllTools:
+    """Tests for register_all_tools() unified registration."""
+
+    def test_registers_standard_tools(self):
+        reg = ToolRegistry()
+        ctx = SessionContext(kernels=[])
+        from tachyon.tools import register_all_tools
+        register_all_tools(reg, ctx)
+        assert reg.tool_count() == 12
+
+    def test_registers_correct_categories(self):
+        reg = ToolRegistry()
+        ctx = SessionContext(kernels=[])
+        from tachyon.tools import register_all_tools
+        register_all_tools(reg, ctx)
+        cats = reg.categories()
+        assert "data_query" in cats
+        assert "source" in cats
+        assert "source_view" in cats
+        assert "analysis" in cats
+
+    def test_evolve_requires_ctx(self):
+        reg = ToolRegistry()
+        ctx = SessionContext(kernels=[])
+        from tachyon.tools import register_all_tools
+        with pytest.raises(ValueError, match="evolve_ctx"):
+            register_all_tools(reg, ctx, include_evolve=True)
+
+
+class TestSerializeToolResult:
+    """Tests for _serialize_tool_result helper."""
+
+    def test_success_serializes_data(self):
+        from tachyon.agent.loop import _serialize_tool_result
+        result = ToolResult.ok({"answer": 42})
+        s = _serialize_tool_result(result)
+        assert json.loads(s) == {"answer": 42}
+
+    def test_failure_includes_message(self):
+        from tachyon.agent.loop import _serialize_tool_result
+        result = ToolResult.fail(ErrorCode.INVALID_ARGUMENT, "bad input")
+        s = _serialize_tool_result(result)
+        obj = json.loads(s)
+        assert obj["error"] == "bad input"
+
+    def test_failure_includes_suggestion(self):
+        from tachyon.agent.loop import _serialize_tool_result
+        result = ToolResult.fail(
+            ErrorCode.METRIC_NOT_FOUND,
+            "metric missing",
+            suggestion="Re-profile with --strategy radical",
+        )
+        s = _serialize_tool_result(result)
+        obj = json.loads(s)
+        assert obj["suggestion"] == "Re-profile with --strategy radical"
+        assert obj["code"] == "METRIC_NOT_FOUND"
+
+    def test_failure_omits_empty_suggestion(self):
+        from tachyon.agent.loop import _serialize_tool_result
+        result = ToolResult.fail(ErrorCode.UNKNOWN, "oops")
+        s = _serialize_tool_result(result)
+        obj = json.loads(s)
+        assert "suggestion" not in obj

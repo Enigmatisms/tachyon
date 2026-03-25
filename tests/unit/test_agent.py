@@ -406,7 +406,10 @@ class TestAgentLoop:
         types = [e.type for e in events]
         assert "system" in types
         assert types[-1] == "done"
-        sys_ev = next(e for e in events if e.type == "system")
+        sys_ev = next(
+            e for e in events
+            if e.type == "system" and not (e.data and e.data.get("llm_start"))
+        )
         assert "LLM error" in sys_ev.content
         assert "API timeout" in sys_ev.content
 

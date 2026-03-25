@@ -16,7 +16,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +53,21 @@ MAX_TURNS = 10
 TYPICAL_TURNS = 5
 
 
+def _has_called_tool(messages: list[Message], tool_name: str) -> bool:
+    """Check whether a specific tool has been called in the message history.
+
+    Scans TOOL-role messages for tool_call_id / name references and
+    ASSISTANT-role messages for tool_calls with the given name.
+    """
+    for msg in messages:
+        if msg.role == Role.TOOL and msg.name == tool_name:
+            return True
+        if msg.role == Role.ASSISTANT and msg.tool_calls:
+            if any(tc.name == tool_name for tc in msg.tool_calls):
+                return True
+    return False
+
+
 @dataclass
 class AgentEvent:
     """Event yielded by the agent loop.
@@ -77,6 +92,26 @@ class AgentUsage:
     compaction_count: int = 0       # number of context compressions applied
 
 
+def _serialize_tool_result(result: Any) -> str:
+    """Serialize a ToolResult to JSON string for LLM consumption.
+
+    Success → json.dumps(result.data)
+    Failure → {"error": message, "suggestion": ..., "code": ...}
+    """
+    from ..errors.handler import ToolResult
+    if result.success:
+        return json.dumps(result.data, ensure_ascii=False, default=str)
+    # Defensive: handle missing error info
+    if result.error is None:
+        return json.dumps({"error": "Tool execution failed"}, ensure_ascii=False)
+    error_obj: dict[str, Any] = {"error": result.error.message}
+    if result.error.suggestion:
+        error_obj["suggestion"] = result.error.suggestion
+    if result.error.code:
+        error_obj["code"] = result.error.code.value
+    return json.dumps(error_obj, ensure_ascii=False, default=str)
+
+
 async def run_agent_loop(
     backend: LLMBackend,
     registry: ToolRegistry,
@@ -94,6 +129,8 @@ async def run_agent_loop(
     prefer_lang: str | None = None,
     max_turns: int = MAX_TURNS,
     skip_synthesis: bool = False,
+    urgent_compile_tool: str | None = None,
+    force_stop_check: Callable[[list[Message], int], str | None] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the multi-turn agent loop.
 
@@ -116,6 +153,12 @@ async def run_agent_loop(
             the penultimate turn.
         prefer_lang: Force output language. ``"zh"`` for Chinese, ``None``
             for auto-detect from *user_message* content.
+        urgent_compile_tool: If set (e.g., ``"compile_kernel"``), inject an
+            urgent USER message when ≤5 turns remain and this tool has not
+            been called yet, forcing the LLM into the compile phase.
+        force_stop_check: Optional callback invoked after each turn's tool
+            calls complete.  If it returns a non-None string, the agent loop
+            terminates immediately and yields a system event with that reason.
 
     Yields:
         AgentEvent instances for the caller to render.
@@ -189,10 +232,48 @@ async def run_agent_loop(
                 synth = "（请用中文综合你的发现）\n\n" + synth
             messages.append(Message(role=Role.USER, content=synth))
 
+        # Urgent compile injection: if running low on turns and the
+        # specified critical tool (e.g., compile_kernel) hasn't been
+        # called yet, inject a USER message to force the LLM into
+        # the compilation phase.
+        if (
+            not is_synthesis
+            and urgent_compile_tool
+            and remaining <= 5
+            and turn > 0
+            and not _has_called_tool(messages, urgent_compile_tool)
+        ):
+            yield AgentEvent(
+                type="system",
+                content=(
+                    f"URGENT: {remaining} turns remaining and "
+                    f"{urgent_compile_tool} has NOT been called. "
+                    "Injecting compile-first directive."
+                ),
+            )
+            messages.append(Message(
+                role=Role.USER,
+                content=(
+                    f"URGENT: Only {remaining} turns remaining and "
+                    f"{urgent_compile_tool} has NOT been called. "
+                    f"Call {urgent_compile_tool} NOW with whatever "
+                    "edits you have. Incomplete optimization is better "
+                    "than a FAILED iteration."
+                ),
+            ))
+
+        # Signal that we're waiting for LLM
+        yield AgentEvent(
+            type="system",
+            content="llm_start",
+            data={"turn": turn + 1, "llm_start": True},
+        )
+
         # Call LLM with per-move timeout and retry
         t_turn = time.monotonic()
         response = None
         llm_error = None
+        effective_timeout = move_timeout  # resets each turn; grows on timeout retries
 
         # Debug: record the exact prompt sent to the LLM
         record_prompt(
@@ -212,19 +293,24 @@ async def run_agent_loop(
                         max_tokens=4096,
                         temperature=0.1,
                     ),
-                    timeout=move_timeout,
+                    timeout=effective_timeout,
                 )
                 llm_error = None
                 break  # success
             except asyncio.TimeoutError:
-                llm_error = "timeout"
+                llm_error = f"API timeout ({effective_timeout}s)"
                 if attempt < max_retries:
+                    backoff = min(5 * 2 ** attempt, 30)
+                    next_timeout = min(int(effective_timeout * 1.5), 300)
                     yield AgentEvent(
                         type="system",
-                        content=f"LLM call timed out ({move_timeout}s), "
-                                f"retrying ({attempt + 1}/{max_retries})...",
+                        content=f"LLM call timed out after {effective_timeout}s, "
+                                f"retrying in {backoff}s with "
+                                f"{next_timeout}s timeout "
+                                f"({attempt + 1}/{max_retries})...",
                     )
-                    await asyncio.sleep(2)  # brief pause before retry
+                    effective_timeout = next_timeout
+                    await asyncio.sleep(backoff)
             except Exception as e:
                 err_str = str(e)
                 is_retryable = (
@@ -306,11 +392,7 @@ async def run_agent_loop(
             result = await registry.execute(tc.name, tc.arguments)
             tool_elapsed = time.monotonic() - t_tool
 
-            result_str = json.dumps(
-                result.data if result.success else {"error": result.error.message},
-                ensure_ascii=False,
-                default=str,
-            )
+            result_str = _serialize_tool_result(result)
 
             # Debug: record tool call and result
             record_tool(tc.name, tc.arguments, result_str, tool_elapsed, result.success)
@@ -332,6 +414,18 @@ async def run_agent_loop(
 
         # Emit turn timing
         turn_elapsed = time.monotonic() - t_turn
+
+        # Force-stop check: after all tool calls in this turn,
+        # ask the caller whether the loop should be terminated early.
+        if force_stop_check is not None and tool_calls:
+            stop_reason = force_stop_check(messages, turn)
+            if stop_reason:
+                yield AgentEvent(
+                    type="system",
+                    content=f"Force stop: {stop_reason}",
+                    data={"force_stop": True},
+                )
+                break
 
         # After turn 0: trim system prompt to save tokens on subsequent turns
         if turn == 0 and lean_system_prompt and messages[0].role == Role.SYSTEM:
@@ -366,7 +460,7 @@ async def run_agent_loop(
             data={"turn": turn + 1, "elapsed": round(turn_elapsed, 1)},
         )
 
-        _log.debug("Agent at turn %d/%d (%.1fs)", turn + 1, MAX_TURNS, turn_elapsed)
+        _log.debug("Agent at turn %d/%d (%.1fs)", turn + 1, max_turns, turn_elapsed)
 
     yield AgentEvent(type="done", data=_usage_dict(usage, t_start, ctx.budget))
 

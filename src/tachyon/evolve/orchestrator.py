@@ -27,11 +27,26 @@ IterationCallback = Callable[[ExperimentRecord], None]
 # Acceptance threshold: GPU time improvement > 3% → accept
 _SIGNIFICANT_THRESHOLD = 3.0
 
+# Tools available during evolve iterations (analysis tools excluded to prevent waste)
+_EVOLVE_TOOLS = {
+    "read_source_file",
+    "edit_source_file",
+    "compile_kernel",
+    "run_benchmark",
+    "reprofile",
+    "compare_metrics",
+    "get_evolve_status",
+}
+
 # Map tool names → display status
 _TOOL_STATUS = {
-    "reprofile": "PROFILING",
+    "read_source_file": "READING",
+    "edit_source_file": "EDITING",
     "compile_kernel": "COMPILING",
     "run_benchmark": "BENCHMARKING",
+    "reprofile": "PROFILING",
+    "compare_metrics": "COMPARING",
+    "get_evolve_status": "READING",
 }
 
 # Sentence boundary regex: CN/EN punctuation
@@ -42,10 +57,8 @@ _NON_SUMMARY_RE = re.compile(
     r'(?i)^('
     r'now |let me |I\'ll |I will |I need |I should |'
     r'let\'s |we need |we should |next |first |'
-    r'the .{0,30}(approach|optimization|error|bug|issue|problem) |'
-    r'my (approach|implementation|code|fix) |'
-    r'this (approach|means|is|was|requires|doesn\'t) |'
-    r'looking at |based on |after |before |since |'
+    r'my (approach|plan|implementation|fix) |'
+    r'looking at |based on |since |'
     r'however[,. ]|unfortunately[,. ]|instead[,. ]'
     r')',
 )
@@ -72,7 +85,7 @@ class EvolveOrchestrator:
         ctx: EvolveContext,
         *,
         max_iterations: int = 10,
-        max_agent_turns: int = 15,
+        max_agent_turns: int = 12,
         total_timeout: int = 3600,
         context_budget: int = 120_000,
         interactive: bool = False,
@@ -221,8 +234,12 @@ class EvolveOrchestrator:
         session = self._ctx.evolve
         session.start_new_experiment()
 
+        evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
+        kernel_summary = self._format_kernel_summary()
+        source_files_str = self._format_source_files()
+
         self._system_prompt = build_evolve_system_prompt(
-            self._registry,
+            evolve_registry,
             baseline_metrics=self._format_baseline_metrics(),
             current_iteration=session.current_iteration,
             max_iterations=self._max_iterations,
@@ -230,10 +247,12 @@ class EvolveOrchestrator:
             best_improvement=self._ctx.evolve.get_best_improvement(),
             experiment_history=self._format_experiment_history(),
             max_turns=self._max_agent_turns,
+            kernel_summary=kernel_summary,
+            source_files=source_files_str,
         )
 
         lean_prompt = build_evolve_lean_prompt(
-            self._registry,
+            evolve_registry,
             baseline_metrics=self._format_baseline_metrics(),
             current_iteration=session.current_iteration,
             max_iterations=self._max_iterations,
@@ -241,17 +260,23 @@ class EvolveOrchestrator:
             best_improvement=self._ctx.evolve.get_best_improvement(),
             experiment_history=self._format_experiment_history(),
             max_turns=self._max_agent_turns,
+            kernel_summary=kernel_summary,
+            source_files=source_files_str,
         )
 
         async for event in run_agent_loop(
             backend=self._backend,
-            registry=self._registry,
+            registry=evolve_registry,
             user_message=user_message,
             system_prompt=self._system_prompt,
             context_budget=self._context_budget,
             max_turns=self._max_agent_turns,
+            move_timeout=150,
+            max_retries=2,
             skip_synthesis=True,
             lean_system_prompt=lean_prompt,
+            urgent_compile_tool="compile_kernel",
+            force_stop_check=self._check_force_stop,
         ):
             yield event
 
@@ -273,16 +298,24 @@ class EvolveOrchestrator:
         self._ctx.compile_fail_count = 0  # Reset compile failure counter
         self._ctx.run_fail_count = 0      # Reset run failure counter
         self._ctx.edit_fail_count = 0     # Reset edit match failure counter
+        self._ctx.iteration_doomed = False  # Reset doomed flag
         t0 = time.monotonic()
 
         _log.info("=== Evolve Iteration %d ===", iteration)
 
         # Update live display
         if self._display:
-            self._display.set_status("HYPOTHESIS")
+            self._display.set_status("THINKING")
+
+        # Filter registry to evolve-only tools (prevents analysis tool waste)
+        evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
+
+        # Pre-load analysis data to embed in system prompt
+        kernel_summary = self._format_kernel_summary()
+        source_files_str = self._format_source_files()
 
         self._system_prompt = build_evolve_system_prompt(
-            self._registry,
+            evolve_registry,
             baseline_metrics=self._format_baseline_metrics(),
             current_iteration=iteration,
             max_iterations=self._max_iterations,
@@ -290,11 +323,13 @@ class EvolveOrchestrator:
             best_improvement=self._ctx.evolve.get_best_improvement(),
             experiment_history=self._format_experiment_history(),
             max_turns=self._max_agent_turns,
+            kernel_summary=kernel_summary,
+            source_files=source_files_str,
         )
 
         # Lean system prompt: used after turn 0 to save tokens
         lean_prompt = build_evolve_lean_prompt(
-            self._registry,
+            evolve_registry,
             baseline_metrics=self._format_baseline_metrics(),
             current_iteration=iteration,
             max_iterations=self._max_iterations,
@@ -302,6 +337,8 @@ class EvolveOrchestrator:
             best_improvement=self._ctx.evolve.get_best_improvement(),
             experiment_history=self._format_experiment_history(),
             max_turns=self._max_agent_turns,
+            kernel_summary=kernel_summary,
+            source_files=source_files_str,
         )
 
         user_message = build_evolve_iteration_prompt(
@@ -317,6 +354,11 @@ class EvolveOrchestrator:
                 + user_message
             )
 
+        # Pre-read primary source file so LLM can edit immediately
+        source_preview = self._read_primary_source()
+        if source_preview:
+            user_message += source_preview
+
         # Save working tree state for rollback (no commit)
         state_patch = self._ctx.git.save_working_state()
         record.git_commit_hash = self._ctx.git.get_current_hash()
@@ -331,13 +373,17 @@ class EvolveOrchestrator:
 
             async for event in run_agent_loop(
                 backend=self._backend,
-                registry=self._registry,
+                registry=evolve_registry,
                 user_message=user_message,
                 system_prompt=self._system_prompt,
                 context_budget=self._context_budget,
                 max_turns=self._max_agent_turns,
+                move_timeout=150,
+                max_retries=2,
                 skip_synthesis=True,
                 lean_system_prompt=lean_prompt,
+                urgent_compile_tool="compile_kernel",
+                force_stop_check=self._check_force_stop,
             ):
                 if event.type == "text" and event.content:
                     hypothesis_parts.append(event.content)
@@ -349,22 +395,17 @@ class EvolveOrchestrator:
                     _log.info("  Tool call: %s", event.content)
                     if self._display and event.data:
                         tool_name = event.data.get("name", "")
-                        if tool_name:
-                            self._display.set_status(
-                                _TOOL_STATUS.get(tool_name, "EDITING"),
-                                tool_name,
-                            )
+                        status = _TOOL_STATUS.get(tool_name, "RUNNING")
+                        self._display.set_status(status, tool_name)
                 elif event.type == "tool_result":
-                    if self._display and event.data:
-                        tool_name = event.data.get("name", "")
-                        if tool_name:
-                            self._display.set_status(
-                                _TOOL_STATUS.get(tool_name, "EDITING"),
-                                tool_name,
-                            )
+                    pass  # Keep current tool status until next llm_start
                 elif event.type == "system":
                     if event.content:
                         _log.info("  System: %s", event.content)
+                    # LLM call starting → show THINKING only before first tool call
+                    if event.data and event.data.get("llm_start"):
+                        if self._display and tool_call_count == 0:
+                            self._display.set_status("THINKING")
                     if "LLM error" in (event.content or ""):
                         llm_error_msg = event.content
 
@@ -424,6 +465,7 @@ class EvolveOrchestrator:
         record: ExperimentRecord,
         text: str,
         marker: str = "[SUMMARY]",
+        max_len: int = 300,
     ) -> None:
         """Extract summary from LLM output text using the [SUMMARY] marker.
 
@@ -431,10 +473,18 @@ class EvolveOrchestrator:
         1. Find the last ``[SUMMARY]`` marker and take 1-3 sentences after it.
         2. Take the last substantive paragraph (>30 chars) as a summary.
         3. Take the last 3 sentences of the full text.
+
+        Result is capped at *max_len* characters.
         """
         if not text:
             return
         clean = _strip_markdown(text)
+
+        def _cap(s: str) -> str:
+            if len(s) <= max_len:
+                return s
+            cut = s.rfind(" ", 0, max_len)
+            return s[:cut if cut > max_len // 2 else max_len] + "..."
 
         # Strategy 1: [SUMMARY] marker (last occurrence)
         idx = clean.rfind(marker)
@@ -446,7 +496,7 @@ class EvolveOrchestrator:
                 after = after[:end].strip()
             sentences = _split_sentences(after)
             if sentences:
-                record.summary = " ".join(sentences[:3])
+                record.summary = _cap(" ".join(sentences[:3]))
                 return
 
         # Strategy 2: Last substantive paragraph that looks like a summary
@@ -459,7 +509,7 @@ class EvolveOrchestrator:
             if _is_summary_text(flat_para):
                 sentences = _split_sentences(flat_para)
                 if sentences:
-                    record.summary = " ".join(sentences[-3:])
+                    record.summary = _cap(" ".join(sentences[-3:]))
                     return
 
         # Strategy 3: Last 3 sentences that look like a summary
@@ -467,9 +517,9 @@ class EvolveOrchestrator:
         sentences = _split_sentences(flat)
         summary_sentences = [s for s in sentences if _is_summary_text(s)]
         if summary_sentences:
-            record.summary = " ".join(summary_sentences[-3:])
+            record.summary = _cap(" ".join(summary_sentences[-3:]))
         elif sentences:
-            record.summary = " ".join(sentences[-3:])
+            record.summary = _cap(" ".join(sentences[-3:]))
 
     def _evaluate_iteration(
         self,
@@ -614,6 +664,29 @@ class EvolveOrchestrator:
                 record.status = ExperimentStatus.ROLLED_BACK
             _log.info("Rolled back iteration %d.", record.iteration)
 
+    def _check_force_stop(self, messages: list, turn: int) -> str | None:
+        """Return a stop reason if the iteration should be force-terminated."""
+        ctx = self._ctx
+        if ctx.edit_fail_count >= 4:
+            ctx.iteration_doomed = True
+            return (
+                f"{ctx.edit_fail_count} consecutive edit failures — "
+                "iteration terminated."
+            )
+        if ctx.compile_fail_count >= 2:
+            ctx.iteration_doomed = True
+            return (
+                f"{ctx.compile_fail_count} consecutive compile failures — "
+                "iteration terminated."
+            )
+        if ctx.run_fail_count >= 2:
+            ctx.iteration_doomed = True
+            return (
+                f"{ctx.run_fail_count} consecutive run failures — "
+                "iteration terminated."
+            )
+        return None
+
     # --- Formatting helpers ---
 
     @staticmethod
@@ -696,6 +769,102 @@ class EvolveOrchestrator:
                     ]
                     if err_lines:
                         line += f"\n  Build error: {err_lines[-1][:150]}"
+            # Runtime crash: classify and inject pattern so LLM avoids same mistake
+            if (
+                e.run_exit_code is not None
+                and e.run_exit_code != 0
+                and e.status in (ExperimentStatus.FAILED, ExperimentStatus.ROLLED_BACK)
+            ):
+                from .tools import _classify_crash
+                crash_type = _classify_crash(e.run_exit_code, e.run_output)
+                line += f"\n  CRASH: {crash_type}"
+                # Show what code change caused it (so LLM avoids the pattern)
+                if e.code_changes:
+                    change_files = [c.file.rsplit("/", 1)[-1] for c in e.code_changes]
+                    line += f"\n  Changed: {', '.join(change_files[:3])}"
+                    # Extract first meaningful diff hunk as context
+                    for c in e.code_changes:
+                        if c.diff:
+                            line += f"\n  AVOID: the edit pattern that caused this crash"
+                            break
+            # Show failure phase
+            if e.status == ExperimentStatus.FAILED:
+                reached = "compile" if e.build_log else "edit"
+                if e.run_exit_code is not None:
+                    reached = "benchmark"
+                if e.optimized_metrics is not None:
+                    reached = "reprofile"
+                line += f"\n  Reached: {reached} phase"
             lines.append(line)
 
         return "\n".join(lines)
+
+    def _format_kernel_summary(self) -> str:
+        """Format kernel summary for embedding in system prompt."""
+        if not self._ctx.kernels:
+            return ""
+        k = self._ctx.kernels[0]
+        name = getattr(k, "demangled_name", None) or getattr(k, "kernel_name", "unknown")
+        duration = k.metric_value("gpu__time_duration.sum") if hasattr(k, "metric_value") else None
+        sm = k.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed") if hasattr(k, "metric_value") else None
+        dram = k.metric_value("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed") if hasattr(k, "metric_value") else None
+        occ = k.metric_value("sm__warps_active.avg.pct_of_peak_sustained_active") if hasattr(k, "metric_value") else None
+        parts = [f"Name: {name}"]
+        if duration is not None:
+            parts.append(f"Duration: {duration / 1e6:.2f} ms")
+        if sm is not None:
+            parts.append(f"SM throughput: {sm:.1f}%")
+        if dram is not None:
+            parts.append(f"DRAM throughput: {dram:.1f}%")
+        if occ is not None:
+            parts.append(f"Occupancy: {occ:.1f}%")
+        # Bottleneck classification
+        sm_val = sm or 0
+        dram_val = dram or 0
+        if sm_val > 60 and dram_val < 60:
+            parts.append("Classification: COMPUTE-BOUND")
+        elif dram_val > 60 and sm_val < 60:
+            parts.append("Classification: MEMORY-BOUND")
+        elif sm_val < 40 and dram_val < 40:
+            parts.append("Classification: LATENCY-BOUND")
+        else:
+            parts.append("Classification: BALANCED")
+        return "\n".join(parts)
+
+    def _format_source_files(self) -> str:
+        """Format source file list for embedding in system prompt."""
+        paths = sorted(self._ctx.allowed_source_paths)
+        if not paths:
+            return "(no source files available)"
+        return "\n".join(f"- {p}" for p in paths)
+
+    def _read_primary_source(self) -> str:
+        """Read primary source file for pre-loading into user prompt.
+
+        Returns formatted source text or empty string.
+        Limits to 300 lines to avoid token overflow.
+        """
+        from pathlib import Path
+
+        paths = sorted(self._ctx.allowed_source_paths)
+        if not paths:
+            return ""
+        # Pick the first .cu or .cuh file, or first file
+        primary = paths[0]
+        for p in paths:
+            if p.endswith((".cu", ".cuh")):
+                primary = p
+                break
+        try:
+            content = Path(primary).read_text(encoding="utf-8")
+            lines = content.splitlines()
+            if len(lines) > 300:
+                content = "\n".join(lines[:300])
+                content += f"\n... ({len(lines) - 300} more lines truncated)"
+            return (
+                f"\n\n## Source Code (pre-loaded — use this as old_content for edits)\n"
+                f"File: {primary}\n"
+                f"```\n{content}\n```"
+            )
+        except Exception:
+            return ""

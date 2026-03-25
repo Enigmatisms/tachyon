@@ -83,7 +83,7 @@ def register_source_view_tools(
                         "The file may have been moved since profiling, "
                         "or the report was captured without --import-source yes.",
                     )
-                all_lines = embedded.splitlines()
+                all_lines = embedded.splitlines(keepends=True)
 
             total_lines = len(all_lines)
 
@@ -100,6 +100,9 @@ def register_source_view_tools(
             if end - start > max_lines:
                 end = start + max_lines
 
+            raw_lines = all_lines[start:end]
+            raw_text = "".join(raw_lines)
+
             lines = []
             for i in range(start, end):
                 lines.append({
@@ -113,6 +116,7 @@ def register_source_view_tools(
                 "start_line": start + 1,
                 "end_line": end,
                 "lines": lines,
+                "raw_text": raw_text,
             })
 
         except Exception as e:
@@ -130,6 +134,7 @@ def register_source_view_tools(
             "properties": {},
         },
         handler=list_source_files,
+        category="source_view",
     ))
 
     registry.register(ToolDefinition(
@@ -166,6 +171,7 @@ def register_source_view_tools(
             "required": ["file"],
         },
         handler=read_source_file,
+        category="source_view",
     ))
 
 

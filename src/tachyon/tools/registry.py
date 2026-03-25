@@ -27,11 +27,14 @@ class ToolDefinition:
 
     parameters follows JSON Schema format, enabling automatic conversion
     to OpenAI / Anthropic / MCP tool spec formats.
+
+    category is a Tachyon-internal label for grouping (not sent to LLM APIs).
     """
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema
     handler: Callable[..., Awaitable[ToolResult]] | None = None
+    category: str = "general"
 
     def to_openai(self) -> dict:
         """Convert to OpenAI function calling format."""
@@ -90,6 +93,33 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         """Return all registered tool names."""
         return list(self._tools.keys())
+
+    def categories(self) -> list[str]:
+        """Return sorted list of unique tool categories."""
+        return sorted({t.category for t in self._tools.values()})
+
+    def tools_by_category(self) -> dict[str, list[ToolDefinition]]:
+        """Return tools grouped by category."""
+        groups: dict[str, list[ToolDefinition]] = {}
+        for t in self._tools.values():
+            groups.setdefault(t.category, []).append(t)
+        return groups
+
+    def tool_count(self) -> int:
+        """Return the number of registered tools."""
+        return len(self._tools)
+
+    def filter(self, names: set[str]) -> ToolRegistry:
+        """Return a new registry containing only the named tools.
+
+        Tools not in *names* are silently skipped.
+        """
+        filtered = ToolRegistry()
+        for name in names:
+            tool = self._tools.get(name)
+            if tool is not None:
+                filtered._tools[name] = tool
+        return filtered
 
     async def execute(self, name: str, arguments: dict[str, Any] | str) -> ToolResult:
         """Execute a tool by name with given arguments.

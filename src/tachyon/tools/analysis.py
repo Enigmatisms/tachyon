@@ -95,6 +95,7 @@ def register_analysis_tools(registry: ToolRegistry, ctx: SessionContext) -> None
             "required": ["kernel_id"],
         },
         handler=run_analysis,
+        category="analysis",
     ))
 
     # --- get_optimization_tree ---
@@ -155,4 +156,5 @@ def register_analysis_tools(registry: ToolRegistry, ctx: SessionContext) -> None
             "required": ["kernel_id"],
         },
         handler=get_optimization_tree,
+        category="analysis",
     ))
