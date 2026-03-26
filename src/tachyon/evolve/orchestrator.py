@@ -123,6 +123,12 @@ class EvolveOrchestrator:
                         "Total timeout (%ds) reached after %d iterations.",
                         self._total_timeout, session.current_iteration,
                     )
+                    if self._display:
+                        self._display.notify(
+                            f"[yellow]Timeout ({self._total_timeout}s) reached "
+                            f"after {session.current_iteration} iterations. "
+                            f"Use --timeout to increase.[/yellow]"
+                        )
                     break
 
                 record, fatal = await self._run_iteration(
@@ -184,6 +190,9 @@ class EvolveOrchestrator:
                                 f"[cyan]Strategy converged — saved to branch "
                                 f"{exhausted}. Trying new direction.[/cyan]"
                             )
+
+                        # Record this direction's best as global candidate
+                        session.record_direction_best(exhausted)
                     except Exception as e:
                         _log.warning("Failed to save optimized state: %s", e)
 
@@ -197,6 +206,10 @@ class EvolveOrchestrator:
                     user_feedback = await self._prompt_user_feedback(
                         session.current_iteration, record,
                     )
+
+            # --- Finalize: save current direction + apply global best ---
+            self._finalize_global_best(session, original_branch)
+
         finally:
             current = self._ctx.git.get_current_branch()
             if current != original_branch:
@@ -663,6 +676,79 @@ class EvolveOrchestrator:
             if record.status != ExperimentStatus.FAILED:
                 record.status = ExperimentStatus.ROLLED_BACK
             _log.info("Rolled back iteration %d.", record.iteration)
+
+    def _finalize_global_best(
+        self,
+        session,
+        original_branch: str,
+    ) -> None:
+        """Save current direction + apply global best to original branch.
+
+        After the loop ends:
+        1. If current direction has accepted changes, save to a branch.
+        2. Compare all directions' best results, pick the global winner.
+        3. Apply the winner's file changes to the original branch (unstaged).
+        4. Delete all tachyon-optimized-* branches.
+        """
+        git = self._ctx.git
+
+        # Save current direction if it has unsaved accepted changes
+        if session.best_metrics is not None:
+            try:
+                git._run(["checkout", "."])
+                git._run(["clean", "-fd"])
+                # Check if there are staged changes to save
+                staged = git._run(["diff", "--cached", "--stat"])
+                if staged.stdout.strip():
+                    final_branch = f"tachyon-optimized-{int(time.time())}"
+                    git.create_branch(final_branch)
+                    git.checkout(final_branch)
+                    git.snapshot(
+                        f"[tachyon] optimized kernel "
+                        f"(best from iter {session.best_iteration})"
+                    )
+                    session.record_direction_best(final_branch)
+                    git.checkout(original_branch)
+            except Exception as e:
+                _log.warning("Failed to save final direction: %s", e)
+
+        global_branch = session.global_best_branch
+        if not global_branch:
+            return
+
+        try:
+            # Ensure we're on the original branch
+            current = git.get_current_branch()
+            if current != original_branch:
+                git.checkout(original_branch)
+
+            # Apply global best: pull file state from best branch
+            git._run(["checkout", global_branch, "--", "."])
+            # Unstage so changes appear as working tree modifications
+            git._run(["reset", "HEAD"])
+
+            if self._display:
+                dur = session.global_best_metrics.duration_ms if session.global_best_metrics else None
+                dur_str = f"{dur:.2f}ms" if dur else "?"
+                self._display.notify(
+                    f"[green]Applied global best (iter {session.global_best_iteration}, "
+                    f"GPU time {dur_str}) to working tree.[/green]"
+                )
+
+            # Clean up all tachyon-optimized-* branches
+            branch_result = git._run(
+                ["for-each-ref", "--format=%(refname:short)",
+                 "refs/heads/tachyon-optimized-*"],
+                check=False,
+            )
+            if branch_result.returncode == 0 and branch_result.stdout.strip():
+                for b in branch_result.stdout.strip().splitlines():
+                    b = b.strip()
+                    if b:
+                        git._run(["branch", "-D", b], check=False)
+                _log.info("Cleaned up optimization branches.")
+        except Exception as e:
+            _log.warning("Failed to apply global best: %s", e)
 
     def _check_force_stop(self, messages: list, turn: int) -> str | None:
         """Return a stop reason if the iteration should be force-terminated."""
