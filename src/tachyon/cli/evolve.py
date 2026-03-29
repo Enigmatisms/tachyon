@@ -42,7 +42,7 @@ console = Console()
 @click.option("--interactive", "-i", is_flag=True, help="Pause between iterations for user guidance")
 @click.option("--export", "export_path", default=None, type=click.Path(), help="Export results to markdown file")
 @click.option("--lang", default=None, help="Output language (en/zh)")
-@click.option("--ncu-set", default="full", type=click.Choice(["basic", "detailed", "full"]), help="NCU metric set for profiling")
+@click.option("--ncu-set", default=None, type=click.Choice(["basic", "detailed", "full"]), help="NCU metric set for profiling")
 @click.option("--ncu-metrics", default=None, type=str, help="Comma-separated NCU metrics")
 @click.option("--ncu-args", default=None, type=str, help="Extra arguments to pass to ncu")
 @click.option("--timeout", default=None, type=int, help="Total wall-clock timeout in seconds (default: 300s per iteration)")
@@ -111,6 +111,7 @@ def evolve(
         run_cmd=run_cmd or None,
         max_iterations=max_iterations,
         target_kernel=kernel,
+        reprofile_ncu_set=ncu_set,
     )
 
     # Default run_cmd if not set
@@ -183,7 +184,7 @@ def evolve(
             executable,
             exe_arg_list,
             extra_ncu_args=extra_ncu,
-            metric_set_override=ncu_set,
+            metric_set_override=ncu_set or "full",
             metrics_override=ncu_metrics,
             verbose=verbose,
         )

@@ -29,6 +29,7 @@ class EvolveConfig:
     git_auto_commit: bool = True
     git_auto_rollback: bool = True
     allowed_edit_paths: list[str] = field(default_factory=list)
+    reprofile_ncu_set: str = "basic"
 
     @classmethod
     def load(
@@ -69,7 +70,8 @@ class EvolveConfig:
         data = tomllib.loads(text)
 
         # First try top-level, then fall back to common sections
-        _sections = [data, data.get("build", {}), data.get("run", {})]
+        _sections = [data, data.get("build", {}), data.get("run", {}),
+                      data.get("reprofile", {})]
 
         def _find(key_path: tuple[str, ...]) -> Any:
             for section in _sections:
@@ -96,6 +98,7 @@ class EvolveConfig:
             "git_auto_commit": ("git", "auto_commit"),
             "git_auto_rollback": ("git", "auto_rollback"),
             "allowed_edit_paths": ("allowed_edit_paths",),
+            "reprofile_ncu_set": ("ncu_set",),
         }
 
         for attr, keys in field_map.items():

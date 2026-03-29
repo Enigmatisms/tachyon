@@ -705,7 +705,7 @@ def register_evolve_tools(
     # --- 4. reprofile ---
     async def reprofile(
         kernel: str | None = None,
-        ncu_set: str = "full",
+        ncu_set: str = ctx.config.reprofile_ncu_set,
         ncu_metrics: str | None = None,
     ) -> ToolResult:
         """Re-run NCU profiling on the modified binary.
