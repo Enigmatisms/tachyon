@@ -202,6 +202,45 @@ def _run_cmd(
     )
 
 
+def _compute_bottleneck_summary(ctx: EvolveContext) -> dict | None:
+    """Pre-compute bottleneck summary from mapper for LLM consumption.
+
+    Returns compact dict with top-5 hotspots, or None if no mapper data.
+    Each entry is ~50 tokens; total output ~300 tokens.
+    """
+    mapper = ctx.base.mapper
+    if mapper is None:
+        return None
+
+    try:
+        report = mapper.get_bottleneck_report(top_n=5)
+    except Exception:
+        return None
+
+    if not report:
+        return None
+
+    entries = []
+    for item in report[:5]:
+        entries.append({
+            "file": item["file"],
+            "line": item["line"],
+            "severity_pct": item["severity"],
+            "spi": item["spi"],
+            "dominant_stall": item["dominant_stall"],
+            "focus_hint": item["focus_hint"],
+        })
+
+    return {
+        "top_hotspots": entries,
+        "hint": (
+            f"Focus on top hotspot ({entries[0]['severity_pct']}% severity) "
+            f"at line {entries[0]['line']}: {entries[0]['focus_hint']}"
+            if entries else None
+        ),
+    }
+
+
 def register_evolve_tools(
     registry: ToolRegistry,
     ctx: EvolveContext,
@@ -451,7 +490,6 @@ def register_evolve_tools(
                 timeout=timeout_sec, cwd=str(ctx.git.repo_root),
             )
             elapsed = time.monotonic() - t0
-            ctx.timer.record("build_subprocess", elapsed)
 
             success = result.returncode == 0
             error_output = ""
@@ -623,7 +661,6 @@ def register_evolve_tools(
                 timeout=timeout_sec, cwd=str(ctx.git.repo_root),
             )
             elapsed = time.monotonic() - t0
-            ctx.timer.record("run_subprocess", elapsed)
 
             stdout = result.stdout
             stderr = result.stderr
@@ -757,14 +794,13 @@ def register_evolve_tools(
                 ctx.reader = reader
 
             # Profile the modified binary (suppress spinner — evolve display is active)
-            with ctx.timer.phase("ncu_subprocess"):
-                result = profiler.profile_basic(
-                    ctx.executable,
-                    ctx.exe_args,
-                    metric_set_override=ncu_set,
-                    metrics_override=ncu_metrics,
-                    no_spinner=True,
-                )
+            result = profiler.profile_basic(
+                ctx.executable,
+                ctx.exe_args,
+                metric_set_override=ncu_set,
+                metrics_override=ncu_metrics,
+                no_spinner=True,
+            )
             if not result.success or result.data is None:
                 return ToolResult.fail(
                     ErrorCode.ANALYZER_FAILED,
@@ -776,8 +812,7 @@ def register_evolve_tools(
             _log.info("New NCU report: %s", ncu_rep_path)
 
             # Load the new report
-            with ctx.timer.phase("report_load"):
-                load_result = reader.load(str(ncu_rep_path))
+            load_result = reader.load(str(ncu_rep_path))
             if not load_result.success or load_result.data is None:
                 return ToolResult.fail(
                     ErrorCode.ANALYZER_FAILED,
@@ -863,6 +898,12 @@ def register_evolve_tools(
                         "change_pct": round(pct, 2),
                         "verdict": "IMPROVED" if pct > 3.0 else ("UNCHANGED" if pct >= 0 else "REGRESSED"),
                     }
+
+            # Deep mode: inject bottleneck analysis for data-driven optimization
+            if ctx.config.deep:
+                bottleneck_data = _compute_bottleneck_summary(ctx)
+                if bottleneck_data:
+                    result_data["bottleneck_analysis"] = bottleneck_data
 
             return ToolResult.ok(result_data)
 

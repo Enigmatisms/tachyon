@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 
 from ..agent.loop import AgentEvent, run_agent_loop
 from ..evolve.display import _strip_markdown
@@ -275,6 +276,7 @@ class EvolveOrchestrator:
             kernel_summary=kernel_summary,
             source_files=source_files_str,
             skill_knowledge=skill_knowledge,
+            deep=self._ctx.config.deep,
         )
 
         lean_prompt = build_evolve_lean_prompt(
@@ -289,6 +291,7 @@ class EvolveOrchestrator:
             kernel_summary=kernel_summary,
             source_files=source_files_str,
             skill_brief=skill_brief,
+            deep=self._ctx.config.deep,
         )
 
         async for event in run_agent_loop(
@@ -358,6 +361,7 @@ class EvolveOrchestrator:
                 kernel_summary=kernel_summary,
                 source_files=source_files_str,
                 skill_knowledge=skill_knowledge,
+                deep=self._ctx.config.deep,
             )
 
             # Lean system prompt: used after turn 0 to save tokens
@@ -373,6 +377,7 @@ class EvolveOrchestrator:
                 kernel_summary=kernel_summary,
                 source_files=source_files_str,
                 skill_brief=skill_brief,
+                deep=self._ctx.config.deep,
             )
 
             user_message = build_evolve_iteration_prompt(
@@ -403,6 +408,9 @@ class EvolveOrchestrator:
         _log.info("  Temperature: %.2f (direction_iter=%d)", temperature, direction_iter)
         fatal = False
         _llm_t0: float = 0.0  # Track LLM API wall time
+        _agent_t0 = time.monotonic()  # Track agent loop wall time
+        _tool_before = timer.sum_matching("tool:") if timer.enabled else 0.0
+        _llm_before = timer._totals.get("llm_api", 0.0) if timer.enabled else 0.0
         try:
             tool_call_count = 0
             hypothesis_parts: list[str] = []
@@ -467,6 +475,15 @@ class EvolveOrchestrator:
             if timer.enabled and _llm_t0 > 0:
                 timer.record("llm_api", time.monotonic() - _llm_t0)
                 _llm_t0 = 0.0
+
+            # Record agent overhead: agent loop wall minus LLM API minus tool execution
+            if timer.enabled:
+                agent_wall = time.monotonic() - _agent_t0
+                tool_delta = timer.sum_matching("tool:") - _tool_before
+                llm_delta = timer._totals.get("llm_api", 0.0) - _llm_before
+                overhead = agent_wall - tool_delta - llm_delta
+                if overhead > 0.05:
+                    timer.record("agent_overhead", overhead)
 
             # Surface LLM errors to user (not just logs)
             if llm_error_msg:
@@ -996,7 +1013,37 @@ class EvolveOrchestrator:
             parts.append("Classification: LATENCY-BOUND")
         else:
             parts.append("Classification: BALANCED")
+        # Deep mode: inject source-level hotspot data for data-driven optimization
+        if self._ctx.config.deep:
+            hotspot_text = self._format_deep_hotspots()
+            if hotspot_text:
+                parts.append(hotspot_text)
         return "\n".join(parts)
+
+    def _format_deep_hotspots(self) -> str:
+        """Format top-3 source hotspots for deep mode kernel summary."""
+        mapper = self._ctx.base.mapper
+        if mapper is None:
+            return ""
+
+        try:
+            report = mapper.get_bottleneck_report(top_n=3)
+        except Exception:
+            return ""
+
+        if not report:
+            return ""
+
+        lines = ["\nHotspots (by severity):"]
+        for item in report[:3]:
+            file_short = Path(item["file"]).name
+            lines.append(
+                f"  L{item['line']} ({file_short}): "
+                f"{item['severity']}% severity, "
+                f"SPI={item['spi']}, "
+                f"{item['dominant_stall']} — {item['focus_hint']}"
+            )
+        return "\n".join(lines)
 
     def _format_source_files(self) -> str:
         """Format source file list for embedding in system prompt."""

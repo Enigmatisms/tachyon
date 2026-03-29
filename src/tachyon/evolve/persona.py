@@ -28,6 +28,7 @@ def build_evolve_system_prompt(
     kernel_summary: str = "",
     source_files: str = "",
     skill_knowledge: str = "",
+    deep: bool = False,
 ) -> str:
     """Build the system prompt for evolve (optimization) mode."""
     template = _EVOLVE_PERSONA_MD.read_text(encoding="utf-8")
@@ -48,6 +49,17 @@ def build_evolve_system_prompt(
             preloaded_parts.append(f"### Kernel\n{kernel_summary}\n")
         if source_files:
             preloaded_parts.append(f"### Source Files\n{source_files}\n")
+        if deep:
+            preloaded_parts.append(
+                "### Deep Analysis Mode\n"
+                "Hotspot data (severity %, SPI, stall type, focus_hint) is in the Kernel section "
+                "above and in every reprofile result. Your workflow:\n"
+                "1. **Read** the top hotspot line (from Hotspots list above, or reprofile bottleneck_analysis)\n"
+                "2. **Make ONE targeted edit** at that exact line based on dominant_stall + focus_hint\n"
+                "3. **Immediately compile** — do NOT read more lines or make additional edits first\n"
+                "4. After reprofile, check if top hotspot severity decreased. If it shifted, target the new line.\n"
+                "Do NOT explore the file or make speculative edits. Data-driven means: read hotspot → edit → measure.\n"
+            )
         preloaded = "\n".join(preloaded_parts)
 
     body = template.format(
@@ -80,6 +92,7 @@ def build_evolve_lean_prompt(
     kernel_summary: str = "",
     source_files: str = "",
     skill_brief: str = "",
+    deep: bool = False,
 ) -> str:
     """Build a minimal system prompt used after turn 0 to save tokens.
 
@@ -124,6 +137,13 @@ def build_evolve_lean_prompt(
 
     if experiment_history:
         parts.append(f"\n## History\n{experiment_history}\n")
+
+    if deep:
+        parts.append(
+            "\n## Deep Analysis\n"
+            "Read top hotspot line → ONE edit at that line → compile immediately.\n"
+            "Do NOT read multiple lines or make extra edits before compiling.\n"
+        )
 
     return "\n".join(parts)
 

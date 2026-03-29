@@ -51,6 +51,12 @@ class DebugTimer:
         self._totals[name] += duration
         self._counts[name] += 1
 
+    def sum_matching(self, prefix: str) -> float:
+        """Sum totals for all phases whose name starts with *prefix*."""
+        if not self.enabled:
+            return 0.0
+        return sum(v for k, v in self._totals.items() if k.startswith(prefix))
+
     def format_report(self, wall_time: float | None = None) -> str:
         """Format sorted phase breakdown.
 

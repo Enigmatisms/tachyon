@@ -30,6 +30,7 @@ class EvolveConfig:
     git_auto_rollback: bool = True
     allowed_edit_paths: list[str] = field(default_factory=list)
     reprofile_ncu_set: str = "basic"
+    deep: bool = False
 
     @classmethod
     def load(
@@ -99,6 +100,7 @@ class EvolveConfig:
             "git_auto_rollback": ("git", "auto_rollback"),
             "allowed_edit_paths": ("allowed_edit_paths",),
             "reprofile_ncu_set": ("ncu_set",),
+            "deep": ("deep",),
         }
 
         for attr, keys in field_map.items():

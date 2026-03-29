@@ -48,6 +48,7 @@ console = Console()
 @click.option("--timeout", default=None, type=int, help="Total wall-clock timeout in seconds (default: 300s per iteration)")
 @click.option("--quiet", "-q", is_flag=True, help="Only show final summary, skip per-iteration reports")
 @click.option("--debug-timer", is_flag=True, help="Print per-phase timing breakdown at exit")
+@click.option("--deep", is_flag=True, help="Enable data-driven bottleneck analysis (uses --set detailed for reprofile)")
 def evolve(
     executable: str,
     exe_args: tuple,
@@ -69,6 +70,7 @@ def evolve(
     timeout: int | None,
     quiet: bool,
     debug_timer: bool,
+    deep: bool,
 ) -> None:
     """Automated CUDA kernel optimization via iterative profiling and editing.
 
@@ -111,7 +113,8 @@ def evolve(
         run_cmd=run_cmd or None,
         max_iterations=max_iterations,
         target_kernel=kernel,
-        reprofile_ncu_set=ncu_set,
+        reprofile_ncu_set=ncu_set or ("detailed" if deep else None),
+        deep=deep,
     )
 
     # Default run_cmd if not set
@@ -184,7 +187,7 @@ def evolve(
             executable,
             exe_arg_list,
             extra_ncu_args=extra_ncu,
-            metric_set_override=ncu_set or "full",
+            metric_set_override=ncu_set or ("detailed" if evolve_config.deep else "full"),
             metrics_override=ncu_metrics,
             verbose=verbose,
         )
@@ -353,6 +356,7 @@ async def _run_evolve(
         registry=tool_registry,
         ctx=evolve_ctx,
         max_iterations=evolve_config.max_iterations,
+        max_agent_turns=25 if evolve_config.deep else 15,
         total_timeout=total_timeout,
         interactive=interactive,
         quiet=quiet,
