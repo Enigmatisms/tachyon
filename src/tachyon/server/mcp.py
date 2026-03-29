@@ -35,12 +35,9 @@ class TachyonMCPServer:
         Creates: NcuReportReader -> SessionContext -> ToolRegistry with all 12 tools.
         """
         from tachyon.analyzers.base import AnalyzerRegistry
-        from tachyon.tools.analysis import register_analysis_tools
+        from tachyon.tools import register_all_tools
         from tachyon.tools.context import SessionContext
-        from tachyon.tools.data_query import register_data_query_tools
         from tachyon.tools.registry import ToolRegistry
-        from tachyon.tools.source import register_source_tools
-        from tachyon.tools.source_view import register_source_view_tools
 
         kernels = []
         reader = None  # Track reader for action handle
@@ -94,10 +91,7 @@ class TachyonMCPServer:
         )
 
         self._tool_registry = ToolRegistry()
-        register_data_query_tools(self._tool_registry, self._session)
-        register_source_tools(self._tool_registry, self._session)
-        register_source_view_tools(self._tool_registry, self._session)
-        register_analysis_tools(self._tool_registry, self._session)
+        register_all_tools(self._tool_registry, self._session)
 
     async def run(self) -> None:
         """Start MCP server on stdio transport. Blocks until client disconnects."""

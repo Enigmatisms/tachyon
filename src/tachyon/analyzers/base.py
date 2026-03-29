@@ -143,18 +143,11 @@ class AnalyzerRegistry:
         self._analyzers.append(analyzer)
         logger.debug("Registered analyzer: %s", analyzer.name())
 
-    def auto_register(self, include_nvrules: bool = False) -> None:
+    def auto_register(self) -> None:
         """Import and register all built-in analyzers.
 
         Import here (not at module level) to avoid circular imports and
         to make registration explicit and testable.
-
-        Args:
-            include_nvrules: If True, also register NvRulesAdapter which
-                converts NCU built-in rule results into Findings. Disabled
-                by default because the built-in analyzers cover the same
-                domains with richer quantitative detail. Enable when you
-                want raw NCU rule output (e.g. for debugging or comparison).
         """
         from tachyon.analyzers.instruction import InstructionAnalyzer
         from tachyon.analyzers.launch import LaunchConfigAnalyzer
@@ -172,10 +165,6 @@ class AnalyzerRegistry:
             LaunchConfigAnalyzer,
         ]:
             self.register(cls())
-
-        if include_nvrules:
-            from tachyon.analyzers.nvrules import NvRulesAdapter
-            self.register(NvRulesAdapter())
 
     def all_analyzers(self) -> list[Analyzer]:
         """Return a copy of the registered analyzer list."""

@@ -112,7 +112,7 @@ def profile(
         tachyon profile --no-ai ./app
     """
     log_level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+    logging.getLogger().setLevel(log_level)
 
     config = TachyonConfig.load()
     config.apply_cli_overrides(model=model, depth=depth)

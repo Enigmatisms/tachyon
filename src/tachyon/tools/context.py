@@ -28,6 +28,16 @@ class SessionContext:
     by index. All 12 Tools receive a reference to this context.
     """
 
+    @staticmethod
+    def collect_embedded_sources(
+        kernels: list[KernelReport],
+    ) -> dict[str, str]:
+        """Return ``{path: content}`` for kernels with non-empty embedded source."""
+        return {
+            p: c for k in kernels
+            for p, c in k.source_files.items() if c
+        }
+
     def __init__(
         self,
         kernels: list[KernelReport],
@@ -43,6 +53,9 @@ class SessionContext:
         self.registry = registry
         self.mapper = mapper
         self.allowed_source_paths: set[str] = allowed_source_paths or set()
+        self.embedded_sources: dict[str, str] = (
+            self.collect_embedded_sources(kernels)
+        )
 
     @classmethod
     def build_allowed_source_paths(
@@ -53,9 +66,9 @@ class SessionContext:
         """Build source file whitelist from kernel metadata + mapper.
 
         Collects paths from kernel.source_files keys and
-        mapper.get_mapped_sources(), keeping only existing files.
-        Then expands via #include scanning to discover transitively
-        included headers.
+        mapper.get_mapped_sources(), keeping existing files and files
+        with embedded source content. Then expands via #include
+        scanning to discover transitively included headers.
         """
         paths: set[str] = set()
         for k in kernels:
@@ -65,8 +78,9 @@ class SessionContext:
                 paths.update(mapper.get_mapped_sources())
             except Exception:
                 pass
-        # Keep only existing files
-        paths = {p for p in paths if os.path.isfile(p)}
+        # Keep existing files OR files with embedded source content
+        embedded = cls.collect_embedded_sources(kernels)
+        paths = {p for p in paths if os.path.isfile(p) or p in embedded}
         # Expand via #include scanning
         paths = cls._expand_includes(paths)
         return paths

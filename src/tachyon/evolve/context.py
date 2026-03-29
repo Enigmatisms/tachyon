@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from .config import EvolveConfig
 from .git import GitRollback
 from .session import EvolveSession
+from .timer import DebugTimer
 
 _log = logging.getLogger(__name__)
 
@@ -42,11 +43,14 @@ class EvolveContext:
         self.profiler = profiler
         self.reader = reader
         self.edit_locked = False  # True once benchmark/reprofile runs
+        self.benchmark_fix_allowed = 1  # Allow 1 edit fix after benchmark failure
         self.turn_count = 0      # Incremented by orchestrator per tool call
         self.max_turns = 15      # Set by orchestrator
         self.compile_fail_count = 0  # Consecutive compile failures in iteration
         self.run_fail_count = 0      # Consecutive run failures in iteration
         self.edit_fail_count = 0     # Consecutive edit match failures in iteration
+        self.iteration_doomed = False  # Set True when iteration is unrecoverable
+        self.timer = DebugTimer(enabled=False)  # Enabled via --debug-timer
 
     @property
     def allowed_source_paths(self) -> set[str]:

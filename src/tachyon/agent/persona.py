@@ -27,17 +27,6 @@ NEVER fabricate metrics, source code, or SASS instructions.
 - Numbered recommendations with priority (HIGH/MEDIUM/LOW).
 - Be token-efficient."""
 
-AGENT_IDENTITY = {
-    "name": "Tachyon",
-    "role": "CUDA/HPC Performance Analysis Expert",
-    "expertise": [
-        "NVIDIA GPU microarchitecture",
-        "CUDA kernel optimization",
-        "SASS/PTX instruction analysis",
-        "Source-to-assembly correlation",
-    ],
-}
-
 
 def _build_tool_catalog(registry: ToolRegistry) -> str:
     """Build compact one-line-per-tool catalog from registry."""
@@ -55,12 +44,14 @@ def _build_tool_catalog(registry: ToolRegistry) -> str:
 def build_system_prompt(
     registry: ToolRegistry,
     kernel_context: str | None = None,
+    skill_knowledge: str = "",
 ) -> str:
     """Build the complete system prompt for an agent session (turn 0).
 
     Args:
         registry: ToolRegistry with all tools registered.
         kernel_context: Optional pre-formatted kernel list.
+        skill_knowledge: Optional CUDA optimization knowledge from SkillRegistry.
 
     Returns:
         Complete system prompt with template variables filled.
@@ -73,12 +64,16 @@ def build_system_prompt(
         kernel_list=kernel_context or "(no report loaded yet)",
     )
 
+    if skill_knowledge:
+        body += "\n\n## CUDA Optimization Knowledge\n\n" + skill_knowledge
+
     return _lang_prefix() + body
 
 
 def build_lean_system_prompt(
     registry: ToolRegistry,
     extra: str = "",
+    skill_brief: str = "",
 ) -> str:
     """Build a minimal system prompt for turns after 0.
 
@@ -90,6 +85,8 @@ def build_lean_system_prompt(
     result = _lang_prefix() + body
     if extra:
         result += "\n\n" + extra
+    if skill_brief:
+        result += "\n\n## Optimization Skills\n" + skill_brief
     return result
 
 
@@ -103,14 +100,6 @@ def _lang_prefix() -> str:
     if not instruction:
         return ""
     return f"[Language] {instruction}\n\n"
-
-
-def _lang_instruction() -> str:
-    """Append a language instruction based on current i18n setting.
-
-    DEPRECATED: use _lang_prefix() instead. Kept for backward compat.
-    """
-    return _lang_prefix()
 
 
 def build_kernel_context(kernels: list) -> str:

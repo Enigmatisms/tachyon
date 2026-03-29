@@ -27,11 +27,31 @@ IterationCallback = Callable[[ExperimentRecord], None]
 # Acceptance threshold: GPU time improvement > 3% → accept
 _SIGNIFICANT_THRESHOLD = 3.0
 
+# Adaptive temperature: ramps up within a direction, resets on strategy switch
+_TEMP_BASE = 0.1
+_TEMP_STEP = 0.05
+_TEMP_MAX = 0.4
+
+# Tools available during evolve iterations (analysis tools excluded to prevent waste)
+_EVOLVE_TOOLS = {
+    "read_source_file",
+    "edit_source_file",
+    "compile_kernel",
+    "run_benchmark",
+    "reprofile",
+    "compare_metrics",
+    "get_evolve_status",
+}
+
 # Map tool names → display status
 _TOOL_STATUS = {
-    "reprofile": "PROFILING",
+    "read_source_file": "READING",
+    "edit_source_file": "EDITING",
     "compile_kernel": "COMPILING",
     "run_benchmark": "BENCHMARKING",
+    "reprofile": "PROFILING",
+    "compare_metrics": "COMPARING",
+    "get_evolve_status": "READING",
 }
 
 # Sentence boundary regex: CN/EN punctuation
@@ -42,10 +62,8 @@ _NON_SUMMARY_RE = re.compile(
     r'(?i)^('
     r'now |let me |I\'ll |I will |I need |I should |'
     r'let\'s |we need |we should |next |first |'
-    r'the .{0,30}(approach|optimization|error|bug|issue|problem) |'
-    r'my (approach|implementation|code|fix) |'
-    r'this (approach|means|is|was|requires|doesn\'t) |'
-    r'looking at |based on |after |before |since |'
+    r'my (approach|plan|implementation|fix) |'
+    r'looking at |based on |since |'
     r'however[,. ]|unfortunately[,. ]|instead[,. ]'
     r')',
 )
@@ -79,6 +97,7 @@ class EvolveOrchestrator:
         quiet: bool = False,
         on_iteration: IterationCallback | None = None,
         display=None,
+        skill_registry=None,
     ) -> None:
         self._backend = backend
         self._registry = registry
@@ -91,6 +110,7 @@ class EvolveOrchestrator:
         self._quiet = quiet
         self._on_iteration = on_iteration
         self._display = display
+        self._skill_registry = skill_registry
         self._system_prompt: str | None = None
 
     async def run(self) -> list[ExperimentRecord]:
@@ -100,6 +120,7 @@ class EvolveOrchestrator:
         t_start = time.monotonic()
         user_feedback: str = ""
         strategy_reset: bool = False
+        direction_iter: int = 0  # iterations since last direction reset
         original_branch = self._ctx.git.get_current_branch()
 
         try:
@@ -110,13 +131,21 @@ class EvolveOrchestrator:
                         "Total timeout (%ds) reached after %d iterations.",
                         self._total_timeout, session.current_iteration,
                     )
+                    if self._display:
+                        self._display.notify(
+                            f"[yellow]Timeout ({self._total_timeout}s) reached "
+                            f"after {session.current_iteration} iterations. "
+                            f"Use --timeout to increase.[/yellow]"
+                        )
                     break
 
                 record, fatal = await self._run_iteration(
                     session.current_iteration, user_feedback,
                     strategy_reset=strategy_reset,
+                    direction_iter=direction_iter,
                 )
                 strategy_reset = False
+                direction_iter += 1
                 results.append(record)
                 session.complete_iteration()
 
@@ -171,6 +200,9 @@ class EvolveOrchestrator:
                                 f"[cyan]Strategy converged — saved to branch "
                                 f"{exhausted}. Trying new direction.[/cyan]"
                             )
+
+                        # Record this direction's best as global candidate
+                        session.record_direction_best(exhausted)
                     except Exception as e:
                         _log.warning("Failed to save optimized state: %s", e)
 
@@ -179,11 +211,16 @@ class EvolveOrchestrator:
                     session.best_metrics = None
                     session.best_iteration = -1
                     strategy_reset = True
+                    direction_iter = 0
 
                 if self._interactive and not session.is_finished:
                     user_feedback = await self._prompt_user_feedback(
                         session.current_iteration, record,
                     )
+
+            # --- Finalize: save current direction + apply global best ---
+            self._finalize_global_best(session, original_branch)
+
         finally:
             current = self._ctx.git.get_current_branch()
             if current != original_branch:
@@ -221,8 +258,13 @@ class EvolveOrchestrator:
         session = self._ctx.evolve
         session.start_new_experiment()
 
+        evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
+        kernel_summary = self._format_kernel_summary()
+        source_files_str = self._format_source_files()
+        skill_knowledge, skill_brief = self._query_skills("evolve")
+
         self._system_prompt = build_evolve_system_prompt(
-            self._registry,
+            evolve_registry,
             baseline_metrics=self._format_baseline_metrics(),
             current_iteration=session.current_iteration,
             max_iterations=self._max_iterations,
@@ -230,10 +272,13 @@ class EvolveOrchestrator:
             best_improvement=self._ctx.evolve.get_best_improvement(),
             experiment_history=self._format_experiment_history(),
             max_turns=self._max_agent_turns,
+            kernel_summary=kernel_summary,
+            source_files=source_files_str,
+            skill_knowledge=skill_knowledge,
         )
 
         lean_prompt = build_evolve_lean_prompt(
-            self._registry,
+            evolve_registry,
             baseline_metrics=self._format_baseline_metrics(),
             current_iteration=session.current_iteration,
             max_iterations=self._max_iterations,
@@ -241,23 +286,30 @@ class EvolveOrchestrator:
             best_improvement=self._ctx.evolve.get_best_improvement(),
             experiment_history=self._format_experiment_history(),
             max_turns=self._max_agent_turns,
+            kernel_summary=kernel_summary,
+            source_files=source_files_str,
+            skill_brief=skill_brief,
         )
 
         async for event in run_agent_loop(
             backend=self._backend,
-            registry=self._registry,
+            registry=evolve_registry,
             user_message=user_message,
             system_prompt=self._system_prompt,
             context_budget=self._context_budget,
             max_turns=self._max_agent_turns,
+            move_timeout=150,
+            max_retries=2,
             skip_synthesis=True,
             lean_system_prompt=lean_prompt,
+            urgent_compile_tool="compile_kernel",
+            force_stop_check=self._check_force_stop,
         ):
             yield event
 
     async def _run_iteration(
         self, iteration: int, user_feedback: str = "",
-        *, strategy_reset: bool = False,
+        *, strategy_reset: bool = False, direction_iter: int = 0,
     ) -> tuple[ExperimentRecord, bool]:
         """Execute one complete evolve iteration.
 
@@ -268,61 +320,89 @@ class EvolveOrchestrator:
         record = session.start_new_experiment()
         record.status = ExperimentStatus.HYPOTHESIS
         self._ctx.edit_locked = False  # Allow edits for this iteration
+        self._ctx.benchmark_fix_allowed = 1  # Reset benchmark-fix allowance
         self._ctx.turn_count = 0       # Reset turn counter
         self._ctx.max_turns = self._max_agent_turns
         self._ctx.compile_fail_count = 0  # Reset compile failure counter
         self._ctx.run_fail_count = 0      # Reset run failure counter
         self._ctx.edit_fail_count = 0     # Reset edit match failure counter
+        self._ctx.iteration_doomed = False  # Reset doomed flag
         t0 = time.monotonic()
 
         _log.info("=== Evolve Iteration %d ===", iteration)
 
         # Update live display
         if self._display:
-            self._display.set_status("HYPOTHESIS")
+            self._display.set_status("THINKING")
 
-        self._system_prompt = build_evolve_system_prompt(
-            self._registry,
-            baseline_metrics=self._format_baseline_metrics(),
-            current_iteration=iteration,
-            max_iterations=self._max_iterations,
-            best_iteration=session.best_iteration,
-            best_improvement=self._ctx.evolve.get_best_improvement(),
-            experiment_history=self._format_experiment_history(),
-            max_turns=self._max_agent_turns,
-        )
+        # Filter registry to evolve-only tools (prevents analysis tool waste)
+        evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
 
-        # Lean system prompt: used after turn 0 to save tokens
-        lean_prompt = build_evolve_lean_prompt(
-            self._registry,
-            baseline_metrics=self._format_baseline_metrics(),
-            current_iteration=iteration,
-            max_iterations=self._max_iterations,
-            best_iteration=session.best_iteration,
-            best_improvement=self._ctx.evolve.get_best_improvement(),
-            experiment_history=self._format_experiment_history(),
-            max_turns=self._max_agent_turns,
-        )
+        timer = self._ctx.timer
 
-        user_message = build_evolve_iteration_prompt(
-            iteration=iteration,
-            best_metrics_summary=self._format_best_metrics(),
-            max_turns=self._max_agent_turns,
-            strategy_reset=strategy_reset,
-        )
+        # Pre-load analysis data to embed in system prompt
+        with timer.phase("prompt_build"):
+            kernel_summary = self._format_kernel_summary()
+            source_files_str = self._format_source_files()
+            skill_knowledge, skill_brief = self._query_skills("evolve")
 
-        if user_feedback:
-            user_message = (
-                f"<user_guidance>\n{user_feedback}\n</user_guidance>\n\n"
-                + user_message
+            self._system_prompt = build_evolve_system_prompt(
+                evolve_registry,
+                baseline_metrics=self._format_baseline_metrics(),
+                current_iteration=iteration,
+                max_iterations=self._max_iterations,
+                best_iteration=session.best_iteration,
+                best_improvement=self._ctx.evolve.get_best_improvement(),
+                experiment_history=self._format_experiment_history(),
+                max_turns=self._max_agent_turns,
+                kernel_summary=kernel_summary,
+                source_files=source_files_str,
+                skill_knowledge=skill_knowledge,
             )
 
+            # Lean system prompt: used after turn 0 to save tokens
+            lean_prompt = build_evolve_lean_prompt(
+                evolve_registry,
+                baseline_metrics=self._format_baseline_metrics(),
+                current_iteration=iteration,
+                max_iterations=self._max_iterations,
+                best_iteration=session.best_iteration,
+                best_improvement=self._ctx.evolve.get_best_improvement(),
+                experiment_history=self._format_experiment_history(),
+                max_turns=self._max_agent_turns,
+                kernel_summary=kernel_summary,
+                source_files=source_files_str,
+                skill_brief=skill_brief,
+            )
+
+            user_message = build_evolve_iteration_prompt(
+                iteration=iteration,
+                best_metrics_summary=self._format_best_metrics(),
+                max_turns=self._max_agent_turns,
+                strategy_reset=strategy_reset,
+            )
+
+            if user_feedback:
+                user_message = (
+                    f"<user_guidance>\n{user_feedback}\n</user_guidance>\n\n"
+                    + user_message
+                )
+
+            # Pre-read primary source file so LLM can edit immediately
+            source_preview = self._read_primary_source()
+            if source_preview:
+                user_message += source_preview
+
         # Save working tree state for rollback (no commit)
-        state_patch = self._ctx.git.save_working_state()
-        record.git_commit_hash = self._ctx.git.get_current_hash()
+        with timer.phase("git_ops"):
+            state_patch = self._ctx.git.save_working_state()
+            record.git_commit_hash = self._ctx.git.get_current_hash()
 
         # Run agent loop and track tool calls
+        temperature = min(_TEMP_BASE + direction_iter * _TEMP_STEP, _TEMP_MAX)
+        _log.info("  Temperature: %.2f (direction_iter=%d)", temperature, direction_iter)
         fatal = False
+        _llm_t0: float = 0.0  # Track LLM API wall time
         try:
             tool_call_count = 0
             hypothesis_parts: list[str] = []
@@ -331,44 +411,62 @@ class EvolveOrchestrator:
 
             async for event in run_agent_loop(
                 backend=self._backend,
-                registry=self._registry,
+                registry=evolve_registry,
                 user_message=user_message,
                 system_prompt=self._system_prompt,
                 context_budget=self._context_budget,
                 max_turns=self._max_agent_turns,
+                move_timeout=150,
+                max_retries=2,
                 skip_synthesis=True,
                 lean_system_prompt=lean_prompt,
+                urgent_compile_tool="compile_kernel",
+                force_stop_check=self._check_force_stop,
+                temperature=temperature,
             ):
                 if event.type == "text" and event.content:
                     hypothesis_parts.append(event.content)
                 elif event.type == "thinking" and event.content:
                     thinking_parts.append(event.content)
                 elif event.type == "tool_call":
+                    # Record LLM API time (from llm_start to first tool_call)
+                    if timer.enabled and _llm_t0 > 0:
+                        timer.record("llm_api", time.monotonic() - _llm_t0)
+                        _llm_t0 = 0.0
                     tool_call_count += 1
                     self._ctx.turn_count = tool_call_count
                     _log.info("  Tool call: %s", event.content)
                     if self._display and event.data:
                         tool_name = event.data.get("name", "")
-                        if tool_name:
-                            self._display.set_status(
-                                _TOOL_STATUS.get(tool_name, "EDITING"),
-                                tool_name,
-                            )
+                        status = _TOOL_STATUS.get(tool_name, "RUNNING")
+                        self._display.set_status(status, tool_name)
                 elif event.type == "tool_result":
-                    if self._display and event.data:
-                        tool_name = event.data.get("name", "")
-                        if tool_name:
-                            self._display.set_status(
-                                _TOOL_STATUS.get(tool_name, "EDITING"),
-                                tool_name,
-                            )
+                    # Record tool execution time from event data
+                    if timer.enabled and event.data:
+                        tn = event.data.get("name", "tool")
+                        te = event.data.get("elapsed", 0)
+                        if te > 0:
+                            timer.record(f"tool:{tn}", te)
                 elif event.type == "system":
                     if event.content:
                         _log.info("  System: %s", event.content)
+                    # LLM call starting → track time and show THINKING
+                    if event.data and event.data.get("llm_start"):
+                        if timer.enabled:
+                            if _llm_t0 > 0:
+                                timer.record("llm_api", time.monotonic() - _llm_t0)
+                            _llm_t0 = time.monotonic()
+                        if self._display and tool_call_count == 0:
+                            self._display.set_status("THINKING")
                     if "LLM error" in (event.content or ""):
                         llm_error_msg = event.content
 
             record.tool_call_count = tool_call_count
+
+            # Capture trailing LLM time (final response after last tool)
+            if timer.enabled and _llm_t0 > 0:
+                timer.record("llm_api", time.monotonic() - _llm_t0)
+                _llm_t0 = 0.0
 
             # Surface LLM errors to user (not just logs)
             if llm_error_msg:
@@ -413,9 +511,11 @@ class EvolveOrchestrator:
             self._extract_summary(record, full_text)
 
         if not fatal:
-            self._evaluate_iteration(record, state_patch)
+            with timer.phase("evaluate"):
+                self._evaluate_iteration(record, state_patch)
         else:
-            self._rollback(record, state_patch)
+            with timer.phase("rollback"):
+                self._rollback(record, state_patch)
 
         return record, fatal
 
@@ -424,6 +524,7 @@ class EvolveOrchestrator:
         record: ExperimentRecord,
         text: str,
         marker: str = "[SUMMARY]",
+        max_len: int = 300,
     ) -> None:
         """Extract summary from LLM output text using the [SUMMARY] marker.
 
@@ -431,10 +532,18 @@ class EvolveOrchestrator:
         1. Find the last ``[SUMMARY]`` marker and take 1-3 sentences after it.
         2. Take the last substantive paragraph (>30 chars) as a summary.
         3. Take the last 3 sentences of the full text.
+
+        Result is capped at *max_len* characters.
         """
         if not text:
             return
         clean = _strip_markdown(text)
+
+        def _cap(s: str) -> str:
+            if len(s) <= max_len:
+                return s
+            cut = s.rfind(" ", 0, max_len)
+            return s[:cut if cut > max_len // 2 else max_len] + "..."
 
         # Strategy 1: [SUMMARY] marker (last occurrence)
         idx = clean.rfind(marker)
@@ -446,7 +555,7 @@ class EvolveOrchestrator:
                 after = after[:end].strip()
             sentences = _split_sentences(after)
             if sentences:
-                record.summary = " ".join(sentences[:3])
+                record.summary = _cap(" ".join(sentences[:3]))
                 return
 
         # Strategy 2: Last substantive paragraph that looks like a summary
@@ -459,7 +568,7 @@ class EvolveOrchestrator:
             if _is_summary_text(flat_para):
                 sentences = _split_sentences(flat_para)
                 if sentences:
-                    record.summary = " ".join(sentences[-3:])
+                    record.summary = _cap(" ".join(sentences[-3:]))
                     return
 
         # Strategy 3: Last 3 sentences that look like a summary
@@ -467,9 +576,9 @@ class EvolveOrchestrator:
         sentences = _split_sentences(flat)
         summary_sentences = [s for s in sentences if _is_summary_text(s)]
         if summary_sentences:
-            record.summary = " ".join(summary_sentences[-3:])
+            record.summary = _cap(" ".join(summary_sentences[-3:]))
         elif sentences:
-            record.summary = " ".join(sentences[-3:])
+            record.summary = _cap(" ".join(sentences[-3:]))
 
     def _evaluate_iteration(
         self,
@@ -614,6 +723,137 @@ class EvolveOrchestrator:
                 record.status = ExperimentStatus.ROLLED_BACK
             _log.info("Rolled back iteration %d.", record.iteration)
 
+    def _finalize_global_best(
+        self,
+        session,
+        original_branch: str,
+    ) -> None:
+        """Save current direction + apply global best to original branch.
+
+        After the loop ends:
+        1. If current direction has accepted changes, save to a branch.
+        2. Compare all directions' best results, pick the global winner.
+        3. Apply the winner's file changes to the original branch (unstaged).
+        4. Delete all tachyon-optimized-* branches.
+        """
+        git = self._ctx.git
+
+        # Save current direction if it has unsaved accepted changes
+        if session.best_metrics is not None:
+            try:
+                git._run(["checkout", "."])
+                git._run(["clean", "-fd"])
+                # Check if there are staged changes to save
+                staged = git._run(["diff", "--cached", "--stat"])
+                if staged.stdout.strip():
+                    final_branch = f"tachyon-optimized-{int(time.time())}"
+                    git.create_branch(final_branch)
+                    git.checkout(final_branch)
+                    git.snapshot(
+                        f"[tachyon] optimized kernel "
+                        f"(best from iter {session.best_iteration})"
+                    )
+                    session.record_direction_best(final_branch)
+                    git.checkout(original_branch)
+            except Exception as e:
+                _log.warning("Failed to save final direction: %s", e)
+
+        global_branch = session.global_best_branch
+        if not global_branch:
+            return
+
+        try:
+            # Ensure we're on the original branch
+            current = git.get_current_branch()
+            if current != original_branch:
+                git.checkout(original_branch)
+
+            # Apply global best: pull file state from best branch
+            git._run(["checkout", global_branch, "--", "."])
+            # Unstage so changes appear as working tree modifications
+            git._run(["reset", "HEAD"])
+
+            if self._display:
+                dur = session.global_best_metrics.duration_ms if session.global_best_metrics else None
+                dur_str = f"{dur:.2f}ms" if dur else "?"
+                self._display.notify(
+                    f"[green]Applied global best (iter {session.global_best_iteration}, "
+                    f"GPU time {dur_str}) to working tree.[/green]"
+                )
+
+            # Clean up all tachyon-optimized-* branches
+            branch_result = git._run(
+                ["for-each-ref", "--format=%(refname:short)",
+                 "refs/heads/tachyon-optimized-*"],
+                check=False,
+            )
+            if branch_result.returncode == 0 and branch_result.stdout.strip():
+                for b in branch_result.stdout.strip().splitlines():
+                    b = b.strip()
+                    if b:
+                        git._run(["branch", "-D", b], check=False)
+                _log.info("Cleaned up optimization branches.")
+        except Exception as e:
+            _log.warning("Failed to apply global best: %s", e)
+
+    def _check_force_stop(self, messages: list, turn: int) -> str | None:
+        """Return a stop reason if the iteration should be force-terminated."""
+        ctx = self._ctx
+        if ctx.edit_fail_count >= 4:
+            ctx.iteration_doomed = True
+            return (
+                f"{ctx.edit_fail_count} consecutive edit failures — "
+                "iteration terminated."
+            )
+        if ctx.compile_fail_count >= 2:
+            ctx.iteration_doomed = True
+            return (
+                f"{ctx.compile_fail_count} consecutive compile failures — "
+                "iteration terminated."
+            )
+        if ctx.run_fail_count >= 2:
+            ctx.iteration_doomed = True
+            return (
+                f"{ctx.run_fail_count} consecutive run failures — "
+                "iteration terminated."
+            )
+        return None
+
+    # --- Skill knowledge ---
+
+    def _get_skill_tags(self) -> set[str]:
+        """Derive skill query tags from kernel bottleneck classification."""
+        if not self._ctx.kernels:
+            return set()
+        k = self._ctx.kernels[0]
+        sm = (
+            k.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed")
+            or 0
+        )
+        dram = (
+            k.metric_value(
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed"
+            )
+            or 0
+        )
+        if sm > 60 and dram < 60:
+            return {"compute-bound"}
+        if dram > 60 and sm < 60:
+            return {"memory-bound"}
+        if sm < 40 and dram < 40:
+            return {"latency-bound"}
+        return {"balanced"}
+
+    def _query_skills(self, mode: str = "evolve") -> tuple[str, str]:
+        """Return (skill_knowledge, skill_brief) for the given mode."""
+        reg = self._skill_registry
+        if not reg or reg.count == 0:
+            return "", ""
+        tags = self._get_skill_tags()
+        knowledge = reg.query(tags=tags, mode=mode)
+        brief = reg.query_brief(tags=tags, mode=mode)
+        return knowledge, brief
+
     # --- Formatting helpers ---
 
     @staticmethod
@@ -696,6 +936,102 @@ class EvolveOrchestrator:
                     ]
                     if err_lines:
                         line += f"\n  Build error: {err_lines[-1][:150]}"
+            # Runtime crash: classify and inject pattern so LLM avoids same mistake
+            if (
+                e.run_exit_code is not None
+                and e.run_exit_code != 0
+                and e.status in (ExperimentStatus.FAILED, ExperimentStatus.ROLLED_BACK)
+            ):
+                from .tools import _classify_crash
+                crash_type = _classify_crash(e.run_exit_code, e.run_output)
+                line += f"\n  CRASH: {crash_type}"
+                # Show what code change caused it (so LLM avoids the pattern)
+                if e.code_changes:
+                    change_files = [c.file.rsplit("/", 1)[-1] for c in e.code_changes]
+                    line += f"\n  Changed: {', '.join(change_files[:3])}"
+                    # Extract first meaningful diff hunk as context
+                    for c in e.code_changes:
+                        if c.diff:
+                            line += f"\n  AVOID: the edit pattern that caused this crash"
+                            break
+            # Show failure phase
+            if e.status == ExperimentStatus.FAILED:
+                reached = "compile" if e.build_log else "edit"
+                if e.run_exit_code is not None:
+                    reached = "benchmark"
+                if e.optimized_metrics is not None:
+                    reached = "reprofile"
+                line += f"\n  Reached: {reached} phase"
             lines.append(line)
 
         return "\n".join(lines)
+
+    def _format_kernel_summary(self) -> str:
+        """Format kernel summary for embedding in system prompt."""
+        if not self._ctx.kernels:
+            return ""
+        k = self._ctx.kernels[0]
+        name = getattr(k, "demangled_name", None) or getattr(k, "kernel_name", "unknown")
+        duration = k.metric_value("gpu__time_duration.sum") if hasattr(k, "metric_value") else None
+        sm = k.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed") if hasattr(k, "metric_value") else None
+        dram = k.metric_value("gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed") if hasattr(k, "metric_value") else None
+        occ = k.metric_value("sm__warps_active.avg.pct_of_peak_sustained_active") if hasattr(k, "metric_value") else None
+        parts = [f"Name: {name}"]
+        if duration is not None:
+            parts.append(f"Duration: {duration / 1e6:.2f} ms")
+        if sm is not None:
+            parts.append(f"SM throughput: {sm:.1f}%")
+        if dram is not None:
+            parts.append(f"DRAM throughput: {dram:.1f}%")
+        if occ is not None:
+            parts.append(f"Occupancy: {occ:.1f}%")
+        # Bottleneck classification
+        sm_val = sm or 0
+        dram_val = dram or 0
+        if sm_val > 60 and dram_val < 60:
+            parts.append("Classification: COMPUTE-BOUND")
+        elif dram_val > 60 and sm_val < 60:
+            parts.append("Classification: MEMORY-BOUND")
+        elif sm_val < 40 and dram_val < 40:
+            parts.append("Classification: LATENCY-BOUND")
+        else:
+            parts.append("Classification: BALANCED")
+        return "\n".join(parts)
+
+    def _format_source_files(self) -> str:
+        """Format source file list for embedding in system prompt."""
+        paths = sorted(self._ctx.allowed_source_paths)
+        if not paths:
+            return "(no source files available)"
+        return "\n".join(f"- {p}" for p in paths)
+
+    def _read_primary_source(self) -> str:
+        """Read primary source file for pre-loading into user prompt.
+
+        Returns formatted source text or empty string.
+        Limits to 300 lines to avoid token overflow.
+        """
+        from pathlib import Path
+
+        paths = sorted(self._ctx.allowed_source_paths)
+        if not paths:
+            return ""
+        # Pick the first .cu or .cuh file, or first file
+        primary = paths[0]
+        for p in paths:
+            if p.endswith((".cu", ".cuh")):
+                primary = p
+                break
+        try:
+            content = Path(primary).read_text(encoding="utf-8")
+            lines = content.splitlines()
+            if len(lines) > 300:
+                content = "\n".join(lines[:300])
+                content += f"\n... ({len(lines) - 300} more lines truncated)"
+            return (
+                f"\n\n## Source Code (pre-loaded — use this as old_content for edits)\n"
+                f"File: {primary}\n"
+                f"```\n{content}\n```"
+            )
+        except Exception:
+            return ""

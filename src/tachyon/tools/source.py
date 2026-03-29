@@ -173,6 +173,7 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
             "required": ["kernel_id"],
         },
         handler=get_source_hotspots,
+        category="source",
     ))
 
     # --- get_sass_for_source_line ---
@@ -278,6 +279,7 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
             "required": ["kernel_id", "file", "line"],
         },
         handler=get_sass_for_source_line,
+        category="source",
     ))
 
     # --- get_stall_analysis_for_line ---
@@ -479,6 +481,7 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
             "required": ["kernel_id", "file", "line"],
         },
         handler=get_stall_analysis_for_line,
+        category="source",
     ))
 
     # --- get_performance_hotspots (uses NCUMappingSystem) ---
@@ -575,6 +578,7 @@ def register_source_tools(registry: ToolRegistry, ctx: SessionContext) -> None:
             "required": ["kernel_id"],
         },
         handler=get_performance_hotspots,
+        category="source",
     ))
 
 

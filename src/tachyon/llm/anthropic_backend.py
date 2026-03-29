@@ -62,16 +62,29 @@ def _split_system(
 
         # ---- tool result (Role.TOOL → user with tool_result block) ----
         if msg.role is Role.TOOL:
-            converted.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id,
-                        "content": msg.content or "",
-                    },
-                ],
-            })
+            block: dict[str, Any] = {
+                "type": "tool_result",
+                "tool_use_id": msg.tool_call_id,
+                "content": msg.content or "",
+            }
+            # Merge consecutive tool results into one user message
+            # (Anthropic API requires all results for one assistant turn
+            # in a single user message with multiple content blocks)
+            if (
+                converted
+                and converted[-1]["role"] == "user"
+                and isinstance(converted[-1]["content"], list)
+                and all(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in converted[-1]["content"]
+                )
+            ):
+                converted[-1]["content"].append(block)
+            else:
+                converted.append({
+                    "role": "user",
+                    "content": [block],
+                })
             continue
 
         # ---- assistant with tool_calls → tool_use content blocks ----
@@ -240,7 +253,7 @@ class AnthropicBackend(LLMBackend):
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
 
-        for block in response.content:
+        for block in (response.content or []):
             if getattr(block, "type", None) == "text":
                 text_parts.append(block.text)
             elif getattr(block, "type", None) == "tool_use":

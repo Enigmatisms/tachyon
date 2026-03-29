@@ -1,33 +1,16 @@
 """Tachyon CLI entrypoint — Click-based command group.
 
-Subcommands are registered via explicit imports in their respective modules.
-M1 ships only `analyze`. M3 adds `chat`, M4 adds `profile` and `serve`.
+Subcommands: chat, profile, diff, evolve, serve.
 """
 from __future__ import annotations
-
-import logging
-import os
 
 import click
 
 from tachyon import __version__
+from tachyon.utils.log import configure_logging
 
 
-def _configure_logging() -> None:
-    """Configure logging based on TACHYON_LOG_LEVEL env var.
-
-    Default is WARNING — suppresses httpx INFO, analyzer skip messages, etc.
-    Set TACHYON_LOG_LEVEL=DEBUG for full diagnostics.
-    """
-    level_name = os.environ.get("TACHYON_LOG_LEVEL", "WARNING").upper()
-    level = getattr(logging, level_name, logging.WARNING)
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
-    # Always suppress chatty httpx/httpcore regardless
-    logging.getLogger("httpx").setLevel(max(level, logging.WARNING))
-    logging.getLogger("httpcore").setLevel(max(level, logging.WARNING))
-
-
-_configure_logging()
+configure_logging()
 
 
 @click.group()
@@ -38,9 +21,8 @@ def app() -> None:
 
 # Import subcommand modules so they register themselves with @app.command().
 # This import must come after `app` is defined to avoid circular imports.
-import tachyon.cli.analyze  # noqa: E402, F401
-import tachyon.cli.chat  # noqa: E402, F401  # M3: AI Agent chat
-import tachyon.cli.diff  # noqa: E402, F401  # M5: Profile diff
-import tachyon.cli.evolve  # noqa: E402, F401  # M6: Evolve optimization
-import tachyon.cli.profile  # noqa: E402, F401  # M4: E2E profiling
-import tachyon.cli.serve  # noqa: E402, F401  # M5: MCP serve
+import tachyon.cli.chat  # noqa: E402, F401
+import tachyon.cli.diff  # noqa: E402, F401
+import tachyon.cli.evolve  # noqa: E402, F401
+import tachyon.cli.profile  # noqa: E402, F401
+import tachyon.cli.serve  # noqa: E402, F401

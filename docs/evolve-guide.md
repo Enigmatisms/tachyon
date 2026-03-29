@@ -114,7 +114,7 @@ tachyon evolve [OPTIONS] EXECUTABLE [EXE_ARGS]...
 | `--max-iterations` | 10 | 最大迭代次数 |
 | `--kernel`, `-k` | — | 目标 kernel 名称过滤（子串匹配） |
 | `--model`, `-m` | — | LLM 模型名称 |
-| `--provider`, `-p` | — | LLM 后端（openai, anthropic, litellm） |
+| `--provider`, `-p` | — | LLM 后端（openai, anthropic） |
 | `--interactive`, `-i` | 关 | 迭代间暂停，等待用户确认 |
 | `--verbose`, `-v` | 关 | 显示工具调用和调试信息 |
 | `--quiet`, `-q` | 关 | 只显示最终汇总 |

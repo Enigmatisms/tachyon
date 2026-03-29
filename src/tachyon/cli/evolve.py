@@ -20,7 +20,9 @@ from tachyon.cli.main import app
 from tachyon.config.settings import TachyonConfig
 
 if TYPE_CHECKING:
+    from tachyon.evolve.context import EvolveContext
     from tachyon.llm.backend import LLMBackend
+    from tachyon.tools.registry import ToolRegistry
 
 console = Console()
 
@@ -43,8 +45,9 @@ console = Console()
 @click.option("--ncu-set", default="full", type=click.Choice(["basic", "detailed", "full"]), help="NCU metric set for profiling")
 @click.option("--ncu-metrics", default=None, type=str, help="Comma-separated NCU metrics")
 @click.option("--ncu-args", default=None, type=str, help="Extra arguments to pass to ncu")
-@click.option("--timeout", default=3600, type=int, help="Total wall-clock timeout in seconds")
+@click.option("--timeout", default=None, type=int, help="Total wall-clock timeout in seconds (default: 300s per iteration)")
 @click.option("--quiet", "-q", is_flag=True, help="Only show final summary, skip per-iteration reports")
+@click.option("--debug-timer", is_flag=True, help="Print per-phase timing breakdown at exit")
 def evolve(
     executable: str,
     exe_args: tuple,
@@ -63,8 +66,9 @@ def evolve(
     ncu_set: str | None,
     ncu_metrics: str | None,
     ncu_args: str | None,
-    timeout: int,
+    timeout: int | None,
     quiet: bool,
+    debug_timer: bool,
 ) -> None:
     """Automated CUDA kernel optimization via iterative profiling and editing.
 
@@ -215,12 +219,9 @@ def evolve(
     # --- Build analysis context ---
     from tachyon.analyzers.base import AnalyzerRegistry
     from tachyon.correlator.source_correlator import SourceCorrelator
-    from tachyon.tools.analysis import register_analysis_tools
+    from tachyon.tools import register_all_tools
     from tachyon.tools.context import SessionContext
-    from tachyon.tools.data_query import register_data_query_tools
     from tachyon.tools.registry import ToolRegistry
-    from tachyon.tools.source import register_source_tools
-    from tachyon.tools.source_view import register_source_view_tools
 
     analyzer_registry = AnalyzerRegistry()
     analyzer_registry.auto_register()
@@ -248,10 +249,7 @@ def evolve(
 
     # Create tool registry with all tools
     tool_registry = ToolRegistry()
-    register_data_query_tools(tool_registry, base_session)
-    register_source_tools(tool_registry, base_session)
-    register_source_view_tools(tool_registry, base_session)
-    register_analysis_tools(tool_registry, base_session)
+    register_all_tools(tool_registry, base_session)
 
     # LLM backend is required
     backend = _try_create_backend(config)
@@ -290,6 +288,10 @@ def evolve(
     from tachyon.evolve.tools import register_evolve_tools
     register_evolve_tools(tool_registry, evolve_ctx)
 
+    # Enable debug timer if requested
+    if debug_timer:
+        evolve_ctx.timer.enabled = True
+
     # --- Run evolve loop ---
     mode = "interactive" if interactive else "autonomous"
     profile_mode = "report" if report_file else "auto-profiled"
@@ -302,9 +304,14 @@ def evolve(
     console.print(
         f"Connected to [bold]{config.llm.provider}/{config.llm.model}[/bold]"
     )
+    # Auto-compute timeout: 300s per iteration (covers profiling + LLM + compile)
+    _PER_ITERATION_TIMEOUT = 300
+    effective_timeout = timeout if timeout is not None else max_iterations * _PER_ITERATION_TIMEOUT
+
     asyncio.run(_run_evolve(
         backend, tool_registry, evolve_ctx, evolve_config,
-        verbose, interactive, quiet, export_path, timeout,
+        verbose, interactive, quiet, export_path, effective_timeout,
+        debug_timer,
     ))
 
 
@@ -318,11 +325,16 @@ async def _run_evolve(
     quiet: bool,
     export_path: str | None,
     total_timeout: int,
+    debug_timer: bool,
 ) -> None:
     """Run the full multi-iteration evolve loop."""
+    import time as _time
+
     from tachyon.evolve.display import EvolveProgressDisplay
     from tachyon.evolve.orchestrator import EvolveOrchestrator
     from tachyon.evolve.models import ExperimentStatus
+
+    t_wall_start = _time.monotonic()
 
     display = EvolveProgressDisplay(
         max_iterations=evolve_config.max_iterations,
@@ -331,6 +343,9 @@ async def _run_evolve(
 
     def on_iteration(record) -> None:
         display.add_result(record)
+
+    from tachyon.skills import SkillRegistry
+    skill_registry = SkillRegistry()
 
     orchestrator = EvolveOrchestrator(
         backend=backend,
@@ -342,6 +357,7 @@ async def _run_evolve(
         quiet=quiet,
         on_iteration=on_iteration,
         display=display,
+        skill_registry=skill_registry,
     )
 
     display.start()
@@ -354,28 +370,29 @@ async def _run_evolve(
         # Smart final summary
         _print_final_summary(evolve_ctx.evolve, experiments, quiet)
 
-        # Check for optimization branches saved during convergence
+        # Check for unstaged optimized changes in working tree
         git = evolve_ctx.git
-        tag_result = git._run(["branch", "-l", "tachyon-optimized-*"], check=False)
-        if tag_result.returncode == 0 and tag_result.stdout.strip():
-            branches = [b.strip() for b in tag_result.stdout.strip().splitlines() if b.strip()]
-            if branches:
-                console.print(
-                    f"\n[dim]Optimized kernel states saved on branches: "
-                    f"{', '.join(branches)}. "
-                    f"Review with: git diff <branch>[/dim]"
-                )
-
-        # Check for staged (accepted) changes not yet committed
-        staged_result = git._run(["diff", "--cached", "--stat"], check=False)
-        if staged_result.returncode == 0 and staged_result.stdout.strip():
+        diff_result = git._run(["diff", "--stat"], check=False)
+        if diff_result.returncode == 0 and diff_result.stdout.strip():
             console.print(
-                "\n[dim]Accepted optimizations are staged. "
-                "Commit when ready: git commit -m 'your message'[/dim]"
+                "\n[dim]Optimized source applied to working tree. "
+                "Review with: git diff\n"
+                "Commit when ready: git commit -am 'your message'[/dim]"
             )
 
         if export_path:
             _export_results(experiments, export_path)
+
+        # Print total wall-clock time
+        wall_secs = _time.monotonic() - t_wall_start
+        console.print(f"\n[dim]Total time: {_format_duration(wall_secs)}[/dim]")
+
+        # Print debug timer report if enabled
+        if debug_timer:
+            report = evolve_ctx.timer.format_report(wall_time=wall_secs)
+            if report:
+                console.print(f"\n[dim]Phase timing breakdown:[/dim]")
+                console.print(f"[dim]{report}[/dim]")
 
     finally:
         display.stop()
@@ -392,18 +409,25 @@ def _print_final_summary(
     ok = [e for e in experiments if e.status == ExperimentStatus.SUCCESS]
     fail = [e for e in experiments if e.status != ExperimentStatus.SUCCESS]
 
-    if session.best_iteration >= 0 and session.best_metrics is not session.baseline_metrics:
-        improvement = session.get_best_improvement()
-        best = session.best_iteration
-        best_exp = next((e for e in experiments if e.iteration == best), None)
+    # Use global best (across all directions) if available
+    best_metrics = session.global_best_metrics or session.best_metrics
+    best_iter = (
+        session.global_best_iteration
+        if session.global_best_metrics is not None
+        else session.best_iteration
+    )
+    improvement = session.get_global_best_improvement()
+
+    if best_iter >= 0 and best_metrics is not session.baseline_metrics:
+        best_exp = next((e for e in experiments if e.iteration == best_iter), None)
 
         console.print()
         console.rule(f"[bold green]Optimization Succeeded ({improvement:+.1f}%)[/bold green]")
 
         gpu_before = f"{session.baseline_metrics.duration_ms:.2f}ms" if session.baseline_metrics and session.baseline_metrics.duration_ms else "?"
-        gpu_after = f"{session.best_metrics.duration_ms:.2f}ms" if session.best_metrics and session.best_metrics.duration_ms else "?"
+        gpu_after = f"{best_metrics.duration_ms:.2f}ms" if best_metrics and best_metrics.duration_ms else "?"
         console.print(
-            f"  Best: iter {best}  |  GPU: {gpu_before} -> {gpu_after}  |  "
+            f"  Best: iter {best_iter}  |  GPU: {gpu_before} -> {gpu_after}  |  "
             f"Success: {len(ok)}, Failed: {len(fail)}"
         )
 
@@ -444,6 +468,18 @@ def _export_results(experiments, export_path: str) -> None:
         console.print(f"[green]Exported to {resolved}[/green]")
     except OSError as e:
         console.print(f"[red]Export failed: {e}[/red]")
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds as human-readable duration (e.g. '5m 23s', '1h 12m')."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m}m"
 
 
 def _try_create_backend(config: TachyonConfig) -> LLMBackend | None:

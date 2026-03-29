@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 from tachyon.models.finding import Finding, Severity
-from tachyon.models.opt_tree import OptimizationNode
 from tachyon.tree.opt_tree import (
     BOTTLENECK_BALANCED,
     BOTTLENECK_COMPUTE,
     BOTTLENECK_LATENCY,
     BOTTLENECK_MEMORY,
+    OptimizationNode,
     OptimizationTree,
 )
 

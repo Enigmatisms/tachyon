@@ -511,16 +511,24 @@ class NcuReportReader:
     # -- source files -------------------------------------------------
 
     def _extract_source_files(self, action: Any) -> dict[str, str]:
-        """Extract embedded source file paths from the report.
+        """Extract embedded source file paths and content from the report.
 
-        Returns a mapping of ``{file_path: content}``.  Content is left
-        empty in M1; it will be populated on demand in M2 by
-        :class:`SourceCorrelator`.
+        Returns ``{file_path: content}``.  When ``--import-source yes``
+        was used during profiling, *content* contains the full source
+        text embedded in the ``.ncu-rep``; otherwise it is empty.
         """
         files: dict[str, str] = {}
         try:
-            for src in action.source_files():
-                files[str(src)] = ""  # Content populated on demand in M2
+            sf = action.source_files()
+            # sf is dict-like {path: content} when --import-source was used.
+            # Use .items() to capture content; fall back to key-only iteration
+            # for API compatibility.
+            if hasattr(sf, "items"):
+                for path, content in sf.items():
+                    files[str(path)] = content or ""
+            else:
+                for src in sf:
+                    files[str(src)] = ""
         except (AttributeError, RuntimeError):
             pass
         return files

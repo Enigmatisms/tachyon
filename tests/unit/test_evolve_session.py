@@ -214,3 +214,135 @@ class TestEvolveSession:
         session.record_improvement(record2)
 
         assert session.convergence_count == 0
+
+
+class TestGlobalBest:
+    """Test global best tracking across direction resets."""
+
+    def test_record_direction_best_tracks_global(self) -> None:
+        cfg = EvolveConfig(max_iterations=20)
+        session = EvolveSession(config=cfg)
+
+        # Simulate direction A: baseline 10ms → best 5ms
+        session.baseline_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 10_000_000.0,
+        })
+        session.best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 5_000_000.0,
+        })
+        session.best_iteration = 3
+
+        session.record_direction_best("branch-A")
+
+        assert session.global_best_metrics is not None
+        assert session.global_best_metrics.duration_ms == 5.0
+        assert session.global_best_iteration == 3
+        assert session.global_best_branch == "branch-A"
+
+    def test_global_best_keeps_better_direction(self) -> None:
+        """Direction B worse than A → global best stays A."""
+        cfg = EvolveConfig(max_iterations=20)
+        session = EvolveSession(config=cfg)
+
+        session.baseline_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 10_000_000.0,
+        })
+
+        # Direction A: 5ms
+        session.best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 5_000_000.0,
+        })
+        session.best_iteration = 3
+        session.record_direction_best("branch-A")
+
+        # Direction B: 8ms (worse)
+        session.best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 8_000_000.0,
+        })
+        session.best_iteration = 7
+        session.record_direction_best("branch-B")
+
+        # Global best should still be direction A
+        assert session.global_best_metrics.duration_ms == 5.0
+        assert session.global_best_iteration == 3
+        assert session.global_best_branch == "branch-A"
+
+    def test_global_best_updates_for_better_direction(self) -> None:
+        """Direction C better than A → global best updates to C."""
+        cfg = EvolveConfig(max_iterations=20)
+        session = EvolveSession(config=cfg)
+
+        session.baseline_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 10_000_000.0,
+        })
+
+        # Direction A: 5ms
+        session.best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 5_000_000.0,
+        })
+        session.best_iteration = 3
+        session.record_direction_best("branch-A")
+
+        # Direction C: 3ms (better)
+        session.best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 3_000_000.0,
+        })
+        session.best_iteration = 9
+        session.record_direction_best("branch-C")
+
+        assert session.global_best_metrics.duration_ms == 3.0
+        assert session.global_best_iteration == 9
+        assert session.global_best_branch == "branch-C"
+
+    def test_global_best_survives_session_reset(self) -> None:
+        """Resetting best_metrics (direction switch) doesn't affect global."""
+        cfg = EvolveConfig(max_iterations=20)
+        session = EvolveSession(config=cfg)
+
+        session.baseline_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 10_000_000.0,
+        })
+        session.best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 5_000_000.0,
+        })
+        session.best_iteration = 3
+        session.record_direction_best("branch-A")
+
+        # Simulate convergence reset
+        session.convergence_count = 0
+        session.best_metrics = None
+        session.best_iteration = -1
+
+        # Global best untouched
+        assert session.global_best_metrics is not None
+        assert session.global_best_metrics.duration_ms == 5.0
+        assert session.global_best_branch == "branch-A"
+
+    def test_get_global_best_improvement(self) -> None:
+        cfg = EvolveConfig(max_iterations=20)
+        session = EvolveSession(config=cfg)
+
+        session.baseline_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 10_000_000.0,
+        })
+        session.global_best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 5_000_000.0,
+        })
+
+        improvement = session.get_global_best_improvement()
+        assert improvement == 50.0  # 50% faster
+
+    def test_get_global_best_improvement_falls_back_to_current(self) -> None:
+        """No global best → falls back to current direction best."""
+        cfg = EvolveConfig(max_iterations=20)
+        session = EvolveSession(config=cfg)
+
+        session.baseline_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 10_000_000.0,
+        })
+        session.best_metrics = MetricSnapshot.from_kernel_metrics({
+            "gpu__time_duration.sum": 7_000_000.0,
+        })
+
+        improvement = session.get_global_best_improvement()
+        assert improvement == 30.0  # 30% faster

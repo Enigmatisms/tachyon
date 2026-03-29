@@ -24,7 +24,6 @@ from tachyon.agent.loop import (
     run_agent_loop,
 )
 from tachyon.agent.persona import (
-    AGENT_IDENTITY,
     build_kernel_context,
     build_lean_system_prompt,
     build_system_prompt,
@@ -406,7 +405,10 @@ class TestAgentLoop:
         types = [e.type for e in events]
         assert "system" in types
         assert types[-1] == "done"
-        sys_ev = next(e for e in events if e.type == "system")
+        sys_ev = next(
+            e for e in events
+            if e.type == "system" and not (e.data and e.data.get("llm_start"))
+        )
         assert "LLM error" in sys_ev.content
         assert "API timeout" in sys_ev.content
 
@@ -518,8 +520,8 @@ class TestAgentLoop:
         assert len(trim_events) == 0
 
         # With debug: trim event emitted
-        import tachyon.utils.debug_record as _dr
-        _dr._level = _dr._L.PROMPT
+        from tachyon.utils.log import _L, agent_logger as _al
+        _al._level = _L.PROMPT
         try:
             events = await _run_with(debug=True)
             trim_events = [e for e in events
@@ -527,7 +529,7 @@ class TestAgentLoop:
             assert len(trim_events) == 1
             assert "saved" in trim_events[0].content
         finally:
-            _dr._level = _dr._L.NONE
+            _al._level = _L.NONE
 
     @pytest.mark.asyncio
     async def test_history_prepended(self):
@@ -721,18 +723,6 @@ class TestPrependLangHint:
 # ---------------------------------------------------------------------------
 
 class TestPersona:
-    def test_agent_identity_has_expected_fields(self):
-        assert "name" in AGENT_IDENTITY
-        assert AGENT_IDENTITY["name"] == "Tachyon"
-        assert "role" in AGENT_IDENTITY
-        assert "expertise" in AGENT_IDENTITY
-        assert isinstance(AGENT_IDENTITY["expertise"], list)
-        assert len(AGENT_IDENTITY["expertise"]) > 0
-
-    def test_agent_identity_expertise_contains_cuda(self):
-        expertise_str = " ".join(AGENT_IDENTITY["expertise"]).lower()
-        assert "cuda" in expertise_str
-
     def test_build_system_prompt_loads_template(self):
         """build_system_prompt should produce a string containing persona.md content."""
         registry = _make_registry(_dummy_tool_def("list_kernels", "List all kernels in the report."))

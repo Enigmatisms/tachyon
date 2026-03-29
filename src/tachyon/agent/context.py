@@ -65,7 +65,7 @@ _TOOL_VALUE_MAP: dict[str, ToolValue] = {
     "edit_source_file": ToolValue.SOURCE,
     "reprofile": ToolValue.ANALYSIS,
     "compare_metrics": ToolValue.ANALYSIS,
-    "compile_kernel": ToolValue.OTHER,
+    "compile_kernel": ToolValue.META,
     "run_benchmark": ToolValue.META,
     "get_evolve_status": ToolValue.OTHER,
 }
@@ -248,13 +248,27 @@ def _smart_truncate(content: str, tool_name: str, limit: int) -> str:
 
     JSON content: parse and extract key-value pairs.
     Plain text: keep first paragraph.
+    Key fields for critical tools are preserved at full length.
     """
+    # Tools whose key fields should be preserved intact
+    _PRESERVE_KEYS: dict[str, set[str]] = {
+        "compile_kernel": {"success", "exit_code", "error_output", "next_step"},
+        "list_source_files": {"files"},
+        "get_kernel_summary": {"name", "key_metrics", "duration_ms", "classification"},
+        "run_benchmark": {"exit_code", "parsed_metrics", "next_step"},
+    }
+
     try:
         data = json.loads(content)
         if isinstance(data, dict):
+            preserve = _PRESERVE_KEYS.get(tool_name, set())
             kept: dict[str, Any] = {}
             for k, v in list(data.items()):
-                kept[k] = json.dumps(v, ensure_ascii=False)[:100]
+                if k in preserve:
+                    # Preserve key fields at higher limit
+                    kept[k] = json.dumps(v, ensure_ascii=False)[:500]
+                else:
+                    kept[k] = json.dumps(v, ensure_ascii=False)[:100]
             return f"[{tool_name} (compressed): {json.dumps(kept, ensure_ascii=False)[:limit]}]"
     except (json.JSONDecodeError, TypeError):
         pass

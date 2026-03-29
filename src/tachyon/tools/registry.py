@@ -27,11 +27,14 @@ class ToolDefinition:
 
     parameters follows JSON Schema format, enabling automatic conversion
     to OpenAI / Anthropic / MCP tool spec formats.
+
+    category is a Tachyon-internal label for grouping (not sent to LLM APIs).
     """
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema
     handler: Callable[..., Awaitable[ToolResult]] | None = None
+    category: str = "general"
 
     def to_openai(self) -> dict:
         """Convert to OpenAI function calling format."""
@@ -90,6 +93,18 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         """Return all registered tool names."""
         return list(self._tools.keys())
+
+    def filter(self, names: set[str]) -> ToolRegistry:
+        """Return a new registry containing only the named tools.
+
+        Tools not in *names* are silently skipped.
+        """
+        filtered = ToolRegistry()
+        for name in names:
+            tool = self._tools.get(name)
+            if tool is not None:
+                filtered._tools[name] = tool
+        return filtered
 
     async def execute(self, name: str, arguments: dict[str, Any] | str) -> ToolResult:
         """Execute a tool by name with given arguments.

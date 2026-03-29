@@ -49,8 +49,8 @@ ncu_report_path = "/opt/nvidia/nsight-compute/2024.3.2/extras/python"
 
 | 键 | 类型 | 默认值 | 说明 |
 |-----|------|---------|------|
-| `provider` | string | `"openai"` | 模型提供方：`openai`、`anthropic` 或 `litellm`。 |
-| `model` | string | `"gpt-4o"` | 模型名称，如 `gpt-4o`、`claude-sonnet-4-20250514`，或任意 LiteLLM 支持的模型标识。 |
+| `provider` | string | `"openai"` | 模型提供方：`openai` 或 `anthropic`。 |
+| `model` | string | `"gpt-4o"` | 模型名称，如 `gpt-4o`、`claude-sonnet-4-20250514`。 |
 | `api_key` | string | `null` | 直接填写 API Key（优先级最高）。设置后忽略 `api_key_env`。 |
 | `api_key_env` | string | `"OPENAI_API_KEY"` | 存放 API Key 的环境变量名。当 `api_key` 未设置时使用。 |
 | `base_url` | string | `null` | 自定义 API 地址，适用于代理、Azure、MiniMax、DeepSeek 或本地端点。 |
@@ -130,7 +130,6 @@ Key 读取优先级：`TACHYON_API_KEY` > `config.llm.api_key`（TOML） > `$api
 |--------|---------------------|----------------|
 | OpenAI | `OPENAI_API_KEY` | `export OPENAI_API_KEY=sk-...` |
 | Anthropic | `ANTHROPIC_API_KEY` | `export ANTHROPIC_API_KEY=sk-ant-...` |
-| LiteLLM | 取决于底层模型 | 设置对应提供方所需的 Key 即可。 |
 
 ---
 
@@ -178,7 +177,7 @@ tachyon chat report.ncu-rep
 
 ```bash
 # 不需要 API Key，也不需要配置文件
-tachyon analyze report.ncu-rep --no-ai
+tachyon chat report.ncu-rep --no-ai
 ```
 
 ### 第三方 OpenAI 兼容 API（MiniMax / DeepSeek / 通义千问等）
@@ -192,13 +191,13 @@ tachyon analyze report.ncu-rep --no-ai
 export TACHYON_API_KEY="你的MiniMax Key"
 export TACHYON_BASE_URL=https://api.minimax.chat/v1
 export TACHYON_MODEL=MiniMax-Text-01
-tachyon analyze report.ncu-rep
+tachyon chat report.ncu-rep
 
 # DeepSeek
 export TACHYON_API_KEY="你的DeepSeek Key"
 export TACHYON_BASE_URL=https://api.deepseek.com
 export TACHYON_MODEL=deepseek-chat
-tachyon analyze report.ncu-rep
+tachyon chat report.ncu-rep
 ```
 
 **方式二：配置文件**
@@ -225,7 +224,7 @@ export AGENT_API_KEY="你的Key"
 export TACHYON_API_KEY_ENV=AGENT_API_KEY
 export TACHYON_BASE_URL=https://api.minimax.chat/v1
 export TACHYON_MODEL=MiniMax-Text-01
-tachyon analyze report.ncu-rep
+tachyon chat report.ncu-rep
 ```
 
 ### 自定义 CUDA 安装路径

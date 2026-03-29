@@ -4,13 +4,12 @@ Tachyon 支持多种 LLM 后端，同时可作为 MCP Tool 接入 Ducc（达克�
 
 ## 1. 多 LLM 后端切换
 
-支持三种后端：
+支持两种后端：
 
 | Backend | 覆盖范围 | SDK |
 |---------|---------|-----|
 | `openai` | OpenAI / Azure / vLLM / Ollama 等 OpenAI 兼容端点 | `openai` |
 | `anthropic` | Anthropic Claude 系列 | `anthropic` |
-| `litellm` | 100+ providers 统一路由（Google、Cohere、千帆、智谱等） | `litellm` |
 
 ### 1.1 配置文件切换
 
@@ -28,18 +27,6 @@ api_key_env = "OPENAI_API_KEY"
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
-
-# Google Gemini（走 LiteLLM）
-[llm]
-provider = "litellm"
-model = "gemini/gemini-2.0-flash"
-api_key_env = "GEMINI_API_KEY"
-
-# 百度文心一言（走 LiteLLM）
-[llm]
-provider = "litellm"
-model = "qianfan/ERNIE-Bot-4"
-api_key_env = "QIANFAN_AK"
 
 # 本地 vLLM / Ollama（OpenAI 兼容）
 [llm]
@@ -63,11 +50,6 @@ export TACHYON_MODEL=gpt-4o
 export ANTHROPIC_API_KEY=sk-ant-...
 export TACHYON_LLM_PROVIDER=anthropic
 export TACHYON_MODEL=claude-sonnet-4-20250514
-
-# LiteLLM（任意 provider）
-export GEMINI_API_KEY=...
-export TACHYON_LLM_PROVIDER=litellm
-export TACHYON_MODEL=gemini/gemini-2.0-flash
 ```
 
 ### 1.3 CLI 参数覆盖
@@ -102,8 +84,8 @@ backend = create_backend(
 
 # 从配置加载后修改
 config = TachyonConfig.load()
-config.llm.provider = "litellm"
-config.llm.model = "gemini/gemini-2.0-flash"
+config.llm.provider = "openai"
+config.llm.model = "gpt-4o"
 
 # OpenAI 兼容端点（vLLM、Ollama、自建服务）
 backend = create_backend(
@@ -124,7 +106,7 @@ LLM 连接失败时，Tachyon 自动 fallback 到 Rule-Only 模式：
 Rule-Only 模式输出包括：roofline / memory / occupancy 等分析 Finding、Optimization Tree、Markdown 报告。
 
 ```bash
-tachyon analyze report.ncu-rep --no-ai   # 强制 Rule-Only
+tachyon chat report.ncu-rep --no-ai   # 强制 Rule-Only
 ```
 
 ### 1.7 Token 消耗参考
@@ -184,7 +166,7 @@ Tachyon 通过 MCP 协议对外暴露 9 个分析工具，Ducc 作为 MCP Client
 不用 MCP 时，Ducc 中直接执行 Tachyon 命令也可以：
 
 ```bash
-tachyon analyze report.ncu-rep --format markdown
+tachyon chat report.ncu-rep --no-ai
 tachyon profile ./my_app --strategy radical
 tachyon diff before.ncu-rep after.ncu-rep --threshold 3.0
 ```
@@ -264,23 +246,7 @@ api_key_env = "YOUR_API_KEY"
 
 适用于 vLLM、TGI、Ollama、FastChat、千帆 OpenAI 兼容模式等。
 
-### 3.2 LiteLLM 路由
-
-LiteLLM 通过模型名前缀自动路由：
-
-```python
-"gpt-4o"                                # OpenAI
-"claude-sonnet-4-20250514"                       # Anthropic
-"gemini/gemini-2.0-flash"               # Google
-"command-r-plus"                        # Cohere
-"together_ai/mistralai/Mixtral-8x7B"    # Together AI
-"bedrock/anthropic.claude-3"            # AWS Bedrock
-"azure/gpt-4o"                          # Azure OpenAI
-"qianfan/ERNIE-Bot-4"                   # 百度千帆
-"zhipu/glm-4"                           # 智谱
-```
-
-### 3.3 自定义 Backend
+### 3.2 自定义 Backend
 
 继承 `LLMBackend` 抽象类，实现三个方法：
 
@@ -310,10 +276,9 @@ class MyBackend(LLMBackend):
 | 现象 | 排查 |
 |------|------|
 | `LLM backend not available` | API key 环境变量是否已设置 |
-| `Unknown LLM provider: xxx` | provider 值只能是 openai / anthropic / litellm |
+| `Unknown LLM provider: xxx` | provider 值只能是 openai / anthropic |
 | `ImportError: openai` | `pip install openai` |
 | `ImportError: anthropic` | `pip install anthropic` |
-| `ImportError: litellm` | `pip install litellm` |
 | 自动降级到 Rule-Only | 正常行为，LLM 不可用时自动 fallback |
 | MCP server 连接失败 | `pip install tachyon-cuda[mcp]` |
 | Ducc 找不到 tachyon 命令 | 确认 `tachyon` 在 `$PATH` 中，或 settings.json 中用绝对路径 |

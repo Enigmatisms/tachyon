@@ -155,4 +155,4 @@ basic = "Tip: Try --deep for 2-layer analysis, or --radical for full 3-layer ana
 deep = "Tip: Try --radical for 3-layer analysis with aggressive NCU profiling."
 
 [evolve.iteration]
-prompt = "Optimize this kernel. Follow the cycle strictly: analyze(1-2) → read+edit(2-3) → compile_kernel → run_benchmark → reprofile → compare_metrics. Output {marker} + 1-3 sentence summary after final measurement. You have {max_turns} turns total — reach compile_kernel by turn {half}."
+prompt = "Optimize this kernel. Follow the turn-by-turn plan: read → edit → compile_kernel → run_benchmark → reprofile → compare_metrics → {marker}. You have {max_turns} turns — reach compile_kernel by turn {half}. Use pre-loaded source as old_content for edits. ONE technique per iteration."

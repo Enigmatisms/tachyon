@@ -289,7 +289,10 @@ class TestM3Pipeline:
         types = [e.type for e in events]
         assert "system" in types
         assert "done" in types
-        sys_event = next(e for e in events if e.type == "system")
+        sys_event = next(
+            e for e in events
+            if e.type == "system" and not (e.data and e.data.get("llm_start"))
+        )
         assert "error" in sys_event.content.lower() or "API timeout" in sys_event.content
 
     async def test_token_usage_tracking(self, report_compute_bound: KernelReport):

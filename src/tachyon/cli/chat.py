@@ -151,7 +151,7 @@ class _EvolveState:
     default=None,
     help="LLM model (e.g. gpt-4o, claude-sonnet-4-20250514)",
 )
-@click.option("--provider", "-p", default=None, help="LLM provider (openai/anthropic/litellm)")
+@click.option("--provider", "-p", default=None, help="LLM provider (openai/anthropic)")
 @click.option("--no-ai", is_flag=True, help="Force Rule-Only mode (no LLM)")
 @click.option("--kernel", "-k", default=None, help="Filter kernels by name (glob pattern, e.g. 'matmul*').")
 @click.option("--lang", default=None, help="Language (en/zh)")
@@ -219,12 +219,9 @@ def chat(
     # Set up tools
     from tachyon.analyzers.base import AnalyzerRegistry
     from tachyon.correlator.source_correlator import SourceCorrelator
-    from tachyon.tools.analysis import register_analysis_tools
+    from tachyon.tools import register_all_tools
     from tachyon.tools.context import SessionContext
-    from tachyon.tools.data_query import register_data_query_tools
     from tachyon.tools.registry import ToolRegistry
-    from tachyon.tools.source import register_source_tools
-    from tachyon.tools.source_view import register_source_view_tools
 
     analyzer_registry = AnalyzerRegistry()
     analyzer_registry.auto_register()
@@ -286,10 +283,7 @@ def chat(
     )
 
     tool_registry = ToolRegistry()
-    register_data_query_tools(tool_registry, session)
-    register_source_tools(tool_registry, session)
-    register_source_view_tools(tool_registry, session)
-    register_analysis_tools(tool_registry, session)
+    register_all_tools(tool_registry, session)
 
     # Try to create LLM backend
     backend = None
@@ -342,6 +336,17 @@ async def _chat_loop(
     kernel_context = build_kernel_context(kernels)
     system_prompt = build_system_prompt(tool_registry, kernel_context)
 
+    # Inject skill knowledge into prompts
+    from tachyon.skills import SkillRegistry
+    _skill_registry = SkillRegistry()
+    _skill_knowledge = _skill_registry.query(mode="chat", max_chars=3000)
+    _skill_brief = _skill_registry.query_brief(mode="chat")
+    if _skill_knowledge:
+        system_prompt = build_system_prompt(
+            tool_registry, kernel_context,
+            skill_knowledge=_skill_knowledge,
+        )
+
     # Deep mode: append stage overview to system prompt
     deep_note = ""
     if deep:
@@ -352,7 +357,9 @@ async def _chat_loop(
 
     # Lean system prompt: identity + tool catalog + key rules only.
     # Applied after turn 0 to save ~2000 tokens per subsequent turn.
-    lean_prompt = build_lean_system_prompt(tool_registry, extra=deep_note)
+    lean_prompt = build_lean_system_prompt(
+        tool_registry, extra=deep_note, skill_brief=_skill_brief,
+    )
 
     # Transparency: show user what context the AI agent has
     _show_agent_context(kernels, tool_registry)
@@ -918,8 +925,12 @@ def _enter_evolve_mode(
     register_evolve_tools(evolve_registry, evolve_ctx)
 
     # Build evolve system prompt
+    from tachyon.skills import SkillRegistry as _SkillReg
+    _sr = _SkillReg()
+    _sk = _sr.query(mode="evolve", max_chars=4000)
     evolve_prompt = build_evolve_system_prompt(
         evolve_registry,
+        skill_knowledge=_sk,
     )
 
     es.activate(

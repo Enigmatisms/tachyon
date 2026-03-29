@@ -11,18 +11,24 @@ from rich.text import Text
 
 from ..utils.progress import console as _shared_console
 
+# Braille-dot spinner frames (smooth 10-frame rotation)
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
 if TYPE_CHECKING:
     from .models import ExperimentRecord
 
 
 _ICONS = {
     "PENDING": "\u25cb",
+    "THINKING": "\u2026",
     "HYPOTHESIS": "\u25cf",
+    "READING": "\U0001f4c4",
     "EDITING": "\u270e",
     "COMPILING": "\u2699",
     "BENCHMARKING": "\u25b6",
     "RUNNING": "\u25b6",
     "PROFILING": "\u25b6",
+    "COMPARING": "\u2194",
     "SUCCESS": "\u2713",
     "REGRESSION": "\u2717",
     "FAILED": "\u2717",
@@ -31,12 +37,15 @@ _ICONS = {
 
 _COLORS = {
     "PENDING": "dim",
+    "THINKING": "magenta",
     "HYPOTHESIS": "cyan",
+    "READING": "cyan",
     "EDITING": "yellow",
     "COMPILING": "yellow",
     "BENCHMARKING": "green",
     "RUNNING": "cyan",
     "PROFILING": "cyan",
+    "COMPARING": "cyan",
     "SUCCESS": "green",
     "REGRESSION": "red",
     "FAILED": "red",
@@ -50,19 +59,40 @@ def _strip_markdown(text: str) -> str:
 
 
 def _get_method(record: ExperimentRecord) -> str:
-    """Get optimization summary: LLM summary first, else hypothesis, else code_changes."""
+    """Get a concise optimization summary (target: 1-2 sentences, <200 chars).
+
+    Priority: record.summary → first useful sentence of hypothesis → code change description.
+    """
     if record.summary:
-        return _strip_markdown(record.summary)
+        text = _strip_markdown(record.summary)
+        # Hard cap: summary should be concise
+        if len(text) > 200:
+            cut = text.rfind(" ", 0, 200)
+            text = text[:cut if cut > 100 else 200] + "..."
+        return text
     if record.hypothesis:
-        lines = [l.strip() for l in record.hypothesis.split("\n")
-                   if l.strip() and not l.strip().startswith("#")]
-        if lines:
-            return _strip_markdown("\n".join(lines))
+        # Extract first substantive sentence (not LLM reasoning)
+        from .orchestrator import _split_sentences, _is_summary_text
+        flat = _strip_markdown(record.hypothesis).replace("\n", " ")
+        for sent in _split_sentences(flat):
+            if _is_summary_text(sent) and len(sent) > 15:
+                if len(sent) > 200:
+                    cut = sent.rfind(" ", 0, 200)
+                    sent = sent[:cut if cut > 100 else 200] + "..."
+                return sent
+        # No summary-like sentence found — fall through to code_changes
     if record.code_changes:
         names = sorted({str(c.file).split("/")[-1] for c in record.code_changes})
-        if len(names) == 1:
-            return f"Edited {names[0]}"
-        return f"Edited {', '.join(names[:3])}"
+        # Include diff summary for more context than just filenames
+        parts = []
+        for c in record.code_changes:
+            fname = str(c.file).split("/")[-1]
+            start, end = c.lines_changed
+            if start and end:
+                parts.append(f"{fname}:{start}-{end}")
+            else:
+                parts.append(fname)
+        return f"Edited {', '.join(parts[:3])}"
     return ""
 
 
@@ -135,11 +165,20 @@ class EvolveProgressDisplay:
         self._timer_start = time.monotonic()
 
     def notify(self, text: str) -> None:
-        """Print through the console (stops Live first to prevent duplicate render)."""
+        """Print a persistent message, then resume Live display."""
         if self._live:
             self._live.stop()
-            self._live = None
-        self._console.print(text)
+            self._console.print(text)
+            # Restart Live so subsequent iterations continue to render
+            self._live = Live(
+                self,
+                console=self._console,
+                refresh_per_second=4,
+                transient=True,
+            )
+            self._live.start()
+        else:
+            self._console.print(text)
 
     def render_summary(self, experiments: list) -> None:
         """Print final results as multi-line summary."""
@@ -160,15 +199,18 @@ class EvolveProgressDisplay:
 
         # Status footer (always last line)
         footer = Text()
+        elapsed = time.monotonic() - self._timer_start
+        # Spinner: rotate through braille frames based on wall clock
+        frame = _SPINNER_FRAMES[int(time.monotonic() * 8) % len(_SPINNER_FRAMES)]
+        footer.append(f"{frame} ", style="bold cyan")
         footer.append("Tachyon Evolve", style="bold cyan")
         footer.append(f"  |  Iter {self._current_iteration}/{self._max_iterations}")
-        elapsed = time.monotonic() - self._timer_start
         footer.append(f"  |  {elapsed:.0f}s", style="dim")
+        icon = _ICONS.get(self._current_status, "\u25cb")
+        color = _COLORS.get(self._current_status, "cyan")
+        footer.append("  |  ")
+        footer.append(f"{icon} {self._current_status}", style=color)
         if self._current_tool:
-            icon = _ICONS.get(self._current_status, "\u25cb")
-            color = _COLORS.get(self._current_status, "cyan")
-            footer.append("  |  ")
-            footer.append(f"{icon} {self._current_status}", style=color)
             footer.append(f": {self._current_tool}", style="dim")
         yield footer
 
@@ -197,7 +239,7 @@ def _render_result(record, *, compact: bool = False) -> list[Text]:
     method = _get_method(record)
     if method:
         if compact:
-            method = _truncate(method, 500)
+            method = _truncate(method, 200)
         detail = Text()
         detail.append("    Optimization: ", style="dim")
         detail.append(method, style="dim")

@@ -67,6 +67,7 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
             "required": [],
         },
         handler=list_kernels,
+        category="data_query",
     ))
 
     # --- get_kernel_metrics ---
@@ -126,6 +127,7 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
             "required": ["kernel_id"],
         },
         handler=get_kernel_metrics,
+        category="data_query",
     ))
 
     # --- get_kernel_summary ---
@@ -194,6 +196,7 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
             "required": ["kernel_id"],
         },
         handler=get_kernel_summary,
+        category="data_query",
     ))
 
     # --- get_ncu_rule_results ---
@@ -231,4 +234,5 @@ def register_data_query_tools(registry: ToolRegistry, ctx: SessionContext) -> No
             "required": ["kernel_id"],
         },
         handler=get_ncu_rule_results,
+        category="data_query",
     ))

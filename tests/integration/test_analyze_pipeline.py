@@ -5,6 +5,11 @@ from tachyon.models.kernel import KernelReport
 from tachyon.report.terminal import TerminalReporter
 
 
+def _render_one(reporter: TerminalReporter, report: KernelReport, findings) -> str:
+    """Render a single kernel through the standard render() API."""
+    return reporter.render([report], {report.demangled_name: findings})
+
+
 class TestFullPipeline:
     def test_compute_bound_pipeline(self, report_compute_bound: KernelReport):
         """End-to-end: compute-bound KernelReport -> Analyzers -> TerminalReport."""
@@ -13,7 +18,7 @@ class TestFullPipeline:
         findings = registry.run_all(report_compute_bound)
 
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_compute_bound, findings)
+        output = _render_one(reporter, report_compute_bound, findings)
         assert "COMPUTE-BOUND" in output
         assert len(output) > 100
 
@@ -27,7 +32,7 @@ class TestFullPipeline:
         assert "memory" in sources
 
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_memory_bound, findings)
+        output = _render_one(reporter, report_memory_bound, findings)
         assert "MEMORY-BOUND" in output or "memory" in output.lower()
         assert len(output) > 100
 
@@ -42,7 +47,7 @@ class TestFullPipeline:
         assert "warp_stall" in sources
 
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_latency_bound, findings)
+        output = _render_one(reporter, report_latency_bound, findings)
         assert len(output) > 100
 
     def test_multi_kernel_pipeline(
@@ -77,7 +82,7 @@ class TestFullPipeline:
         findings = registry.run_all(report_minimal)
 
         reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_minimal, findings)
+        output = _render_one(reporter, report_minimal, findings)
         # Should not crash, should show "no significant findings"
         assert "No significant findings" in output or len(output) > 10
 
@@ -88,16 +93,3 @@ class TestFullPipeline:
         findings = registry.run_all(report_latency_bound)
         for i in range(len(findings) - 1):
             assert findings[i].severity >= findings[i + 1].severity
-
-    def test_with_nvrules(self, report_with_rules: KernelReport):
-        """Pipeline includes NvRules findings."""
-        registry = AnalyzerRegistry()
-        registry.auto_register(include_nvrules=True)
-        findings = registry.run_all(report_with_rules)
-
-        nvrule_findings = [f for f in findings if f.source == "nvrules"]
-        assert len(nvrule_findings) > 0
-
-        reporter = TerminalReporter()
-        output = reporter.render_single_kernel(report_with_rules, findings)
-        assert "NCU" in output

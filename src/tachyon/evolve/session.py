@@ -29,6 +29,10 @@ class EvolveSession:
     best_metrics: MetricSnapshot | None = None
     best_iteration: int = -1
     convergence_count: int = 0
+    # Global best across all directions (survives convergence resets)
+    global_best_metrics: MetricSnapshot | None = None
+    global_best_iteration: int = -1
+    global_best_branch: str | None = None
 
     @property
     def has_converged(self) -> bool:
@@ -81,14 +85,35 @@ class EvolveSession:
     def complete_iteration(self) -> None:
         self.current_iteration += 1
 
+    def record_direction_best(self, branch: str) -> None:
+        """Record current direction's best as a candidate for global best."""
+        if self.best_metrics is None:
+            return
+        if self.global_best_metrics is None or (
+            self.best_metrics.duration_ms is not None
+            and self.global_best_metrics.duration_ms is not None
+            and self.best_metrics.duration_ms < self.global_best_metrics.duration_ms
+        ):
+            self.global_best_metrics = self.best_metrics
+            self.global_best_iteration = self.best_iteration
+            self.global_best_branch = branch
+
     def get_best_improvement(self) -> float:
         """Improvement of best over baseline, in percent."""
         if self.baseline_metrics is None or self.best_metrics is None:
             return 0.0
         return _quick_compare(self.baseline_metrics, self.best_metrics)
 
+    def get_global_best_improvement(self) -> float:
+        """Global best improvement over baseline, across all directions."""
+        target = self.global_best_metrics or self.best_metrics
+        if self.baseline_metrics is None or target is None:
+            return 0.0
+        return _quick_compare(self.baseline_metrics, target)
+
     def get_status_summary(self) -> dict[str, Any]:
         best_improvement = self.get_best_improvement()
+        global_improvement = self.get_global_best_improvement()
 
         return {
             "current_iteration": self.current_iteration,
@@ -107,6 +132,8 @@ class EvolveSession:
             ],
             "best_iteration": self.best_iteration,
             "best_improvement_pct": round(best_improvement, 2),
+            "global_best_iteration": self.global_best_iteration,
+            "global_best_improvement_pct": round(global_improvement, 2),
         }
 
 

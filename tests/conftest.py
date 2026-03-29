@@ -171,7 +171,7 @@ def report_balanced(launch_256x4096: LaunchParams, device_h100: DeviceInfo) -> K
 
 @pytest.fixture
 def report_with_rules(launch_256x4096: LaunchParams, device_h100: DeviceInfo) -> KernelReport:
-    """Kernel with NCU rule results for NvRulesAdapter testing."""
+    """Kernel with NCU rule results."""
     return KernelReport(
         kernel_name="rules_kernel",
         demangled_name="rules_kernel<float>",
