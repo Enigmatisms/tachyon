@@ -27,6 +27,7 @@ def build_evolve_system_prompt(
     max_turns: int = 15,
     kernel_summary: str = "",
     source_files: str = "",
+    skill_knowledge: str = "",
 ) -> str:
     """Build the system prompt for evolve (optimization) mode."""
     template = _EVOLVE_PERSONA_MD.read_text(encoding="utf-8")
@@ -61,6 +62,9 @@ def build_evolve_system_prompt(
         half_budget=max_turns // 2,
     )
 
+    if skill_knowledge:
+        body += "\n\n## Optimization Knowledge\n\n" + skill_knowledge
+
     return _lang_prefix() + body + preloaded
 
 
@@ -75,6 +79,7 @@ def build_evolve_lean_prompt(
     max_turns: int = 15,
     kernel_summary: str = "",
     source_files: str = "",
+    skill_brief: str = "",
 ) -> str:
     """Build a minimal system prompt used after turn 0 to save tokens.
 
@@ -110,6 +115,8 @@ def build_evolve_lean_prompt(
     ]
 
     # Include pre-loaded context in lean prompt too (critical for avoiding re-calls)
+    if skill_brief:
+        parts.append(f"\n## Optimization Skills\n{skill_brief}\n")
     if kernel_summary:
         parts.append(f"\n## Kernel\n{kernel_summary}\n")
     if source_files:

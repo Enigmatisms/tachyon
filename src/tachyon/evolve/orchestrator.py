@@ -27,6 +27,11 @@ IterationCallback = Callable[[ExperimentRecord], None]
 # Acceptance threshold: GPU time improvement > 3% → accept
 _SIGNIFICANT_THRESHOLD = 3.0
 
+# Adaptive temperature: ramps up within a direction, resets on strategy switch
+_TEMP_BASE = 0.1
+_TEMP_STEP = 0.05
+_TEMP_MAX = 0.4
+
 # Tools available during evolve iterations (analysis tools excluded to prevent waste)
 _EVOLVE_TOOLS = {
     "read_source_file",
@@ -92,6 +97,7 @@ class EvolveOrchestrator:
         quiet: bool = False,
         on_iteration: IterationCallback | None = None,
         display=None,
+        skill_registry=None,
     ) -> None:
         self._backend = backend
         self._registry = registry
@@ -104,6 +110,7 @@ class EvolveOrchestrator:
         self._quiet = quiet
         self._on_iteration = on_iteration
         self._display = display
+        self._skill_registry = skill_registry
         self._system_prompt: str | None = None
 
     async def run(self) -> list[ExperimentRecord]:
@@ -113,6 +120,7 @@ class EvolveOrchestrator:
         t_start = time.monotonic()
         user_feedback: str = ""
         strategy_reset: bool = False
+        direction_iter: int = 0  # iterations since last direction reset
         original_branch = self._ctx.git.get_current_branch()
 
         try:
@@ -134,8 +142,10 @@ class EvolveOrchestrator:
                 record, fatal = await self._run_iteration(
                     session.current_iteration, user_feedback,
                     strategy_reset=strategy_reset,
+                    direction_iter=direction_iter,
                 )
                 strategy_reset = False
+                direction_iter += 1
                 results.append(record)
                 session.complete_iteration()
 
@@ -201,6 +211,7 @@ class EvolveOrchestrator:
                     session.best_metrics = None
                     session.best_iteration = -1
                     strategy_reset = True
+                    direction_iter = 0
 
                 if self._interactive and not session.is_finished:
                     user_feedback = await self._prompt_user_feedback(
@@ -250,6 +261,7 @@ class EvolveOrchestrator:
         evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
         kernel_summary = self._format_kernel_summary()
         source_files_str = self._format_source_files()
+        skill_knowledge, skill_brief = self._query_skills("evolve")
 
         self._system_prompt = build_evolve_system_prompt(
             evolve_registry,
@@ -262,6 +274,7 @@ class EvolveOrchestrator:
             max_turns=self._max_agent_turns,
             kernel_summary=kernel_summary,
             source_files=source_files_str,
+            skill_knowledge=skill_knowledge,
         )
 
         lean_prompt = build_evolve_lean_prompt(
@@ -275,6 +288,7 @@ class EvolveOrchestrator:
             max_turns=self._max_agent_turns,
             kernel_summary=kernel_summary,
             source_files=source_files_str,
+            skill_brief=skill_brief,
         )
 
         async for event in run_agent_loop(
@@ -295,7 +309,7 @@ class EvolveOrchestrator:
 
     async def _run_iteration(
         self, iteration: int, user_feedback: str = "",
-        *, strategy_reset: bool = False,
+        *, strategy_reset: bool = False, direction_iter: int = 0,
     ) -> tuple[ExperimentRecord, bool]:
         """Execute one complete evolve iteration.
 
@@ -329,6 +343,7 @@ class EvolveOrchestrator:
         with timer.phase("prompt_build"):
             kernel_summary = self._format_kernel_summary()
             source_files_str = self._format_source_files()
+            skill_knowledge, skill_brief = self._query_skills("evolve")
 
             self._system_prompt = build_evolve_system_prompt(
                 evolve_registry,
@@ -341,6 +356,7 @@ class EvolveOrchestrator:
                 max_turns=self._max_agent_turns,
                 kernel_summary=kernel_summary,
                 source_files=source_files_str,
+                skill_knowledge=skill_knowledge,
             )
 
             # Lean system prompt: used after turn 0 to save tokens
@@ -355,6 +371,7 @@ class EvolveOrchestrator:
                 max_turns=self._max_agent_turns,
                 kernel_summary=kernel_summary,
                 source_files=source_files_str,
+                skill_brief=skill_brief,
             )
 
             user_message = build_evolve_iteration_prompt(
@@ -381,6 +398,8 @@ class EvolveOrchestrator:
             record.git_commit_hash = self._ctx.git.get_current_hash()
 
         # Run agent loop and track tool calls
+        temperature = min(_TEMP_BASE + direction_iter * _TEMP_STEP, _TEMP_MAX)
+        _log.info("  Temperature: %.2f (direction_iter=%d)", temperature, direction_iter)
         fatal = False
         _llm_t0: float = 0.0  # Track LLM API wall time
         try:
@@ -402,6 +421,7 @@ class EvolveOrchestrator:
                 lean_system_prompt=lean_prompt,
                 urgent_compile_tool="compile_kernel",
                 force_stop_check=self._check_force_stop,
+                temperature=temperature,
             ):
                 if event.type == "text" and event.content:
                     hypothesis_parts.append(event.content)
@@ -797,6 +817,41 @@ class EvolveOrchestrator:
                 "iteration terminated."
             )
         return None
+
+    # --- Skill knowledge ---
+
+    def _get_skill_tags(self) -> set[str]:
+        """Derive skill query tags from kernel bottleneck classification."""
+        if not self._ctx.kernels:
+            return set()
+        k = self._ctx.kernels[0]
+        sm = (
+            k.metric_value("sm__throughput.avg.pct_of_peak_sustained_elapsed")
+            or 0
+        )
+        dram = (
+            k.metric_value(
+                "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed"
+            )
+            or 0
+        )
+        if sm > 60 and dram < 60:
+            return {"compute-bound"}
+        if dram > 60 and sm < 60:
+            return {"memory-bound"}
+        if sm < 40 and dram < 40:
+            return {"latency-bound"}
+        return {"balanced"}
+
+    def _query_skills(self, mode: str = "evolve") -> tuple[str, str]:
+        """Return (skill_knowledge, skill_brief) for the given mode."""
+        reg = self._skill_registry
+        if not reg or reg.count == 0:
+            return "", ""
+        tags = self._get_skill_tags()
+        knowledge = reg.query(tags=tags, mode=mode)
+        brief = reg.query_brief(tags=tags, mode=mode)
+        return knowledge, brief
 
     # --- Formatting helpers ---
 

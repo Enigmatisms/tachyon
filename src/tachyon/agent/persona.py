@@ -44,12 +44,14 @@ def _build_tool_catalog(registry: ToolRegistry) -> str:
 def build_system_prompt(
     registry: ToolRegistry,
     kernel_context: str | None = None,
+    skill_knowledge: str = "",
 ) -> str:
     """Build the complete system prompt for an agent session (turn 0).
 
     Args:
         registry: ToolRegistry with all tools registered.
         kernel_context: Optional pre-formatted kernel list.
+        skill_knowledge: Optional CUDA optimization knowledge from SkillRegistry.
 
     Returns:
         Complete system prompt with template variables filled.
@@ -62,12 +64,16 @@ def build_system_prompt(
         kernel_list=kernel_context or "(no report loaded yet)",
     )
 
+    if skill_knowledge:
+        body += "\n\n## CUDA Optimization Knowledge\n\n" + skill_knowledge
+
     return _lang_prefix() + body
 
 
 def build_lean_system_prompt(
     registry: ToolRegistry,
     extra: str = "",
+    skill_brief: str = "",
 ) -> str:
     """Build a minimal system prompt for turns after 0.
 
@@ -79,6 +85,8 @@ def build_lean_system_prompt(
     result = _lang_prefix() + body
     if extra:
         result += "\n\n" + extra
+    if skill_brief:
+        result += "\n\n## Optimization Skills\n" + skill_brief
     return result
 
 

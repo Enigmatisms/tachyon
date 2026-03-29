@@ -51,6 +51,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tachyon = ["agent/*.md", "i18n/*.toml", "skills/cuda/*.md", "skills/cuda/.gitkeep"]
+
 [tool.ruff]
 target-version = "py310"
 line-length = 100

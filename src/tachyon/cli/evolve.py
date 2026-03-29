@@ -344,6 +344,9 @@ async def _run_evolve(
     def on_iteration(record) -> None:
         display.add_result(record)
 
+    from tachyon.skills import SkillRegistry
+    skill_registry = SkillRegistry()
+
     orchestrator = EvolveOrchestrator(
         backend=backend,
         registry=tool_registry,
@@ -354,6 +357,7 @@ async def _run_evolve(
         quiet=quiet,
         on_iteration=on_iteration,
         display=display,
+        skill_registry=skill_registry,
     )
 
     display.start()

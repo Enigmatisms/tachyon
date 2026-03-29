@@ -336,6 +336,17 @@ async def _chat_loop(
     kernel_context = build_kernel_context(kernels)
     system_prompt = build_system_prompt(tool_registry, kernel_context)
 
+    # Inject skill knowledge into prompts
+    from tachyon.skills import SkillRegistry
+    _skill_registry = SkillRegistry()
+    _skill_knowledge = _skill_registry.query(mode="chat", max_chars=3000)
+    _skill_brief = _skill_registry.query_brief(mode="chat")
+    if _skill_knowledge:
+        system_prompt = build_system_prompt(
+            tool_registry, kernel_context,
+            skill_knowledge=_skill_knowledge,
+        )
+
     # Deep mode: append stage overview to system prompt
     deep_note = ""
     if deep:
@@ -346,7 +357,9 @@ async def _chat_loop(
 
     # Lean system prompt: identity + tool catalog + key rules only.
     # Applied after turn 0 to save ~2000 tokens per subsequent turn.
-    lean_prompt = build_lean_system_prompt(tool_registry, extra=deep_note)
+    lean_prompt = build_lean_system_prompt(
+        tool_registry, extra=deep_note, skill_brief=_skill_brief,
+    )
 
     # Transparency: show user what context the AI agent has
     _show_agent_context(kernels, tool_registry)
@@ -912,8 +925,12 @@ def _enter_evolve_mode(
     register_evolve_tools(evolve_registry, evolve_ctx)
 
     # Build evolve system prompt
+    from tachyon.skills import SkillRegistry as _SkillReg
+    _sr = _SkillReg()
+    _sk = _sr.query(mode="evolve", max_chars=4000)
     evolve_prompt = build_evolve_system_prompt(
         evolve_registry,
+        skill_knowledge=_sk,
     )
 
     es.activate(

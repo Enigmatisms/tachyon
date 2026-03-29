@@ -131,6 +131,7 @@ async def run_agent_loop(
     skip_synthesis: bool = False,
     urgent_compile_tool: str | None = None,
     force_stop_check: Callable[[list[Message], int], str | None] | None = None,
+    temperature: float = 0.1,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the multi-turn agent loop.
 
@@ -291,7 +292,7 @@ async def run_agent_loop(
                         tool_choice="none" if is_synthesis else "auto",
                         stream=stream,
                         max_tokens=4096,
-                        temperature=0.1,
+                        temperature=temperature,
                     ),
                     timeout=effective_timeout,
                 )
