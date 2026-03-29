@@ -49,7 +49,7 @@ def _prepend_lang_hint(text: str, *, explicit_lang: bool = False) -> str:
         return _CJK_LANG_HINT + text
     return text
 
-MAX_TURNS = 10
+MAX_TURNS = 15
 TYPICAL_TURNS = 5
 
 
@@ -240,7 +240,7 @@ async def run_agent_loop(
         if (
             not is_synthesis
             and urgent_compile_tool
-            and remaining <= 5
+            and remaining <= max(max_turns // 3, 3)
             and turn > 0
             and not _has_called_tool(messages, urgent_compile_tool)
         ):

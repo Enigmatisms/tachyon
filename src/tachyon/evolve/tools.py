@@ -59,10 +59,21 @@ def _scan_diff_safety(old_content: str, new_content: str) -> list[str]:
     Returns a list of human-readable warnings. Empty list = no issues detected.
     Runs on raw text (no AST), so it's fast and zero-dependency.
     """
+    from collections import Counter
+
     warnings: list[str] = []
-    old_lines = old_content.splitlines()
-    new_lines = new_content.splitlines()
-    removed = {ln.strip() for ln in old_lines} - {ln.strip() for ln in new_lines}
+
+    def _strip_comments(lines: list[str]) -> list[str]:
+        """Filter out single-line comment lines (// and /* ... */)."""
+        return [ln for ln in lines
+                if not ln.strip().startswith("//") and not ln.strip().startswith("/*")]
+
+    old_lines = _strip_comments(old_content.splitlines())
+    new_lines = _strip_comments(new_content.splitlines())
+    old_counts = Counter(ln.strip() for ln in old_lines)
+    new_counts = Counter(ln.strip() for ln in new_lines)
+    # Lines whose count decreased (net removals)
+    removed = {ln for ln in old_counts if old_counts[ln] > new_counts.get(ln, 0)}
     added = {ln.strip() for ln in new_lines} - {ln.strip() for ln in old_lines}
 
     # 1. Removed synchronization primitives
@@ -228,14 +239,6 @@ def register_evolve_tools(
                     "this iteration is past the editing phase.",
                     "Proceed to: run_benchmark → reprofile → compare_metrics. "
                     "New ideas go to the NEXT iteration.",
-                )
-
-            # If this is a benchmark-fix edit, consume the allowance
-            if ctx.edit_locked and ctx.benchmark_fix_allowed > 0:
-                ctx.benchmark_fix_allowed -= 1
-                _log.info(
-                    "Benchmark-fix edit allowed (%d remaining)",
-                    ctx.benchmark_fix_allowed,
                 )
 
             allowed = ctx.allowed_source_paths
@@ -1097,12 +1100,43 @@ def _fuzzy_match(
     last_anchor = non_empty[-1].strip()
 
     file_lines = current_content.splitlines()
-    # Find first anchor
+    # Collect all positions where first_anchor appears
+    candidates = [
+        i for i, line in enumerate(file_lines) if line.strip() == first_anchor
+    ]
+    if not candidates:
+        return None
+
+    # If multiple candidates, verify context to disambiguate
+    context_lines = [l.strip() for l in non_empty[1:min(4, len(non_empty))]]
     start_idx = None
-    for i, line in enumerate(file_lines):
-        if line.strip() == first_anchor:
-            start_idx = i
+    for ci in candidates:
+        if len(candidates) == 1 or not context_lines:
+            start_idx = ci
             break
+        # Check that context lines appear (in order) in the candidate region
+        file_upcoming = [
+            fl.strip() for fl in file_lines[ci + 1:ci + len(old_lines) + tolerance]
+            if fl.strip()
+        ]
+        # All context lines must appear in order within the region
+        ui = 0
+        matched = True
+        for ctx_ln in context_lines:
+            found = False
+            while ui < len(file_upcoming):
+                if file_upcoming[ui] == ctx_ln:
+                    ui += 1
+                    found = True
+                    break
+                ui += 1
+            if not found:
+                matched = False
+                break
+        if matched:
+            start_idx = ci
+            break
+
     if start_idx is None:
         return None
 

@@ -90,7 +90,7 @@ class EvolveOrchestrator:
         ctx: EvolveContext,
         *,
         max_iterations: int = 10,
-        max_agent_turns: int = 12,
+        max_agent_turns: int = 15,
         total_timeout: int = 3600,
         context_budget: int = 120_000,
         interactive: bool = False,
@@ -320,6 +320,7 @@ class EvolveOrchestrator:
         record = session.start_new_experiment()
         record.status = ExperimentStatus.HYPOTHESIS
         self._ctx.edit_locked = False  # Allow edits for this iteration
+        self._ctx.benchmark_fix_allowed = 1  # Reset benchmark-fix allowance
         self._ctx.turn_count = 0       # Reset turn counter
         self._ctx.max_turns = self._max_agent_turns
         self._ctx.compile_fail_count = 0  # Reset compile failure counter
