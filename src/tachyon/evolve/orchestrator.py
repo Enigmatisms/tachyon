@@ -323,61 +323,66 @@ class EvolveOrchestrator:
         # Filter registry to evolve-only tools (prevents analysis tool waste)
         evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
 
+        timer = self._ctx.timer
+
         # Pre-load analysis data to embed in system prompt
-        kernel_summary = self._format_kernel_summary()
-        source_files_str = self._format_source_files()
+        with timer.phase("prompt_build"):
+            kernel_summary = self._format_kernel_summary()
+            source_files_str = self._format_source_files()
 
-        self._system_prompt = build_evolve_system_prompt(
-            evolve_registry,
-            baseline_metrics=self._format_baseline_metrics(),
-            current_iteration=iteration,
-            max_iterations=self._max_iterations,
-            best_iteration=session.best_iteration,
-            best_improvement=self._ctx.evolve.get_best_improvement(),
-            experiment_history=self._format_experiment_history(),
-            max_turns=self._max_agent_turns,
-            kernel_summary=kernel_summary,
-            source_files=source_files_str,
-        )
-
-        # Lean system prompt: used after turn 0 to save tokens
-        lean_prompt = build_evolve_lean_prompt(
-            evolve_registry,
-            baseline_metrics=self._format_baseline_metrics(),
-            current_iteration=iteration,
-            max_iterations=self._max_iterations,
-            best_iteration=session.best_iteration,
-            best_improvement=self._ctx.evolve.get_best_improvement(),
-            experiment_history=self._format_experiment_history(),
-            max_turns=self._max_agent_turns,
-            kernel_summary=kernel_summary,
-            source_files=source_files_str,
-        )
-
-        user_message = build_evolve_iteration_prompt(
-            iteration=iteration,
-            best_metrics_summary=self._format_best_metrics(),
-            max_turns=self._max_agent_turns,
-            strategy_reset=strategy_reset,
-        )
-
-        if user_feedback:
-            user_message = (
-                f"<user_guidance>\n{user_feedback}\n</user_guidance>\n\n"
-                + user_message
+            self._system_prompt = build_evolve_system_prompt(
+                evolve_registry,
+                baseline_metrics=self._format_baseline_metrics(),
+                current_iteration=iteration,
+                max_iterations=self._max_iterations,
+                best_iteration=session.best_iteration,
+                best_improvement=self._ctx.evolve.get_best_improvement(),
+                experiment_history=self._format_experiment_history(),
+                max_turns=self._max_agent_turns,
+                kernel_summary=kernel_summary,
+                source_files=source_files_str,
             )
 
-        # Pre-read primary source file so LLM can edit immediately
-        source_preview = self._read_primary_source()
-        if source_preview:
-            user_message += source_preview
+            # Lean system prompt: used after turn 0 to save tokens
+            lean_prompt = build_evolve_lean_prompt(
+                evolve_registry,
+                baseline_metrics=self._format_baseline_metrics(),
+                current_iteration=iteration,
+                max_iterations=self._max_iterations,
+                best_iteration=session.best_iteration,
+                best_improvement=self._ctx.evolve.get_best_improvement(),
+                experiment_history=self._format_experiment_history(),
+                max_turns=self._max_agent_turns,
+                kernel_summary=kernel_summary,
+                source_files=source_files_str,
+            )
+
+            user_message = build_evolve_iteration_prompt(
+                iteration=iteration,
+                best_metrics_summary=self._format_best_metrics(),
+                max_turns=self._max_agent_turns,
+                strategy_reset=strategy_reset,
+            )
+
+            if user_feedback:
+                user_message = (
+                    f"<user_guidance>\n{user_feedback}\n</user_guidance>\n\n"
+                    + user_message
+                )
+
+            # Pre-read primary source file so LLM can edit immediately
+            source_preview = self._read_primary_source()
+            if source_preview:
+                user_message += source_preview
 
         # Save working tree state for rollback (no commit)
-        state_patch = self._ctx.git.save_working_state()
-        record.git_commit_hash = self._ctx.git.get_current_hash()
+        with timer.phase("git_ops"):
+            state_patch = self._ctx.git.save_working_state()
+            record.git_commit_hash = self._ctx.git.get_current_hash()
 
         # Run agent loop and track tool calls
         fatal = False
+        _llm_t0: float = 0.0  # Track LLM API wall time
         try:
             tool_call_count = 0
             hypothesis_parts: list[str] = []
@@ -403,6 +408,10 @@ class EvolveOrchestrator:
                 elif event.type == "thinking" and event.content:
                     thinking_parts.append(event.content)
                 elif event.type == "tool_call":
+                    # Record LLM API time (from llm_start to first tool_call)
+                    if timer.enabled and _llm_t0 > 0:
+                        timer.record("llm_api", time.monotonic() - _llm_t0)
+                        _llm_t0 = 0.0
                     tool_call_count += 1
                     self._ctx.turn_count = tool_call_count
                     _log.info("  Tool call: %s", event.content)
@@ -411,18 +420,32 @@ class EvolveOrchestrator:
                         status = _TOOL_STATUS.get(tool_name, "RUNNING")
                         self._display.set_status(status, tool_name)
                 elif event.type == "tool_result":
-                    pass  # Keep current tool status until next llm_start
+                    # Record tool execution time from event data
+                    if timer.enabled and event.data:
+                        tn = event.data.get("name", "tool")
+                        te = event.data.get("elapsed", 0)
+                        if te > 0:
+                            timer.record(f"tool:{tn}", te)
                 elif event.type == "system":
                     if event.content:
                         _log.info("  System: %s", event.content)
-                    # LLM call starting → show THINKING only before first tool call
+                    # LLM call starting → track time and show THINKING
                     if event.data and event.data.get("llm_start"):
+                        if timer.enabled:
+                            if _llm_t0 > 0:
+                                timer.record("llm_api", time.monotonic() - _llm_t0)
+                            _llm_t0 = time.monotonic()
                         if self._display and tool_call_count == 0:
                             self._display.set_status("THINKING")
                     if "LLM error" in (event.content or ""):
                         llm_error_msg = event.content
 
             record.tool_call_count = tool_call_count
+
+            # Capture trailing LLM time (final response after last tool)
+            if timer.enabled and _llm_t0 > 0:
+                timer.record("llm_api", time.monotonic() - _llm_t0)
+                _llm_t0 = 0.0
 
             # Surface LLM errors to user (not just logs)
             if llm_error_msg:
@@ -467,9 +490,11 @@ class EvolveOrchestrator:
             self._extract_summary(record, full_text)
 
         if not fatal:
-            self._evaluate_iteration(record, state_patch)
+            with timer.phase("evaluate"):
+                self._evaluate_iteration(record, state_patch)
         else:
-            self._rollback(record, state_patch)
+            with timer.phase("rollback"):
+                self._rollback(record, state_patch)
 
         return record, fatal
 

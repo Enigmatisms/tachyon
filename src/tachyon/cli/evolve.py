@@ -20,7 +20,9 @@ from tachyon.cli.main import app
 from tachyon.config.settings import TachyonConfig
 
 if TYPE_CHECKING:
+    from tachyon.evolve.context import EvolveContext
     from tachyon.llm.backend import LLMBackend
+    from tachyon.tools.registry import ToolRegistry
 
 console = Console()
 
@@ -45,6 +47,7 @@ console = Console()
 @click.option("--ncu-args", default=None, type=str, help="Extra arguments to pass to ncu")
 @click.option("--timeout", default=None, type=int, help="Total wall-clock timeout in seconds (default: 300s per iteration)")
 @click.option("--quiet", "-q", is_flag=True, help="Only show final summary, skip per-iteration reports")
+@click.option("--debug-timer", is_flag=True, help="Print per-phase timing breakdown at exit")
 def evolve(
     executable: str,
     exe_args: tuple,
@@ -65,6 +68,7 @@ def evolve(
     ncu_args: str | None,
     timeout: int | None,
     quiet: bool,
+    debug_timer: bool,
 ) -> None:
     """Automated CUDA kernel optimization via iterative profiling and editing.
 
@@ -284,6 +288,10 @@ def evolve(
     from tachyon.evolve.tools import register_evolve_tools
     register_evolve_tools(tool_registry, evolve_ctx)
 
+    # Enable debug timer if requested
+    if debug_timer:
+        evolve_ctx.timer.enabled = True
+
     # --- Run evolve loop ---
     mode = "interactive" if interactive else "autonomous"
     profile_mode = "report" if report_file else "auto-profiled"
@@ -303,6 +311,7 @@ def evolve(
     asyncio.run(_run_evolve(
         backend, tool_registry, evolve_ctx, evolve_config,
         verbose, interactive, quiet, export_path, effective_timeout,
+        debug_timer,
     ))
 
 
@@ -316,6 +325,7 @@ async def _run_evolve(
     quiet: bool,
     export_path: str | None,
     total_timeout: int,
+    debug_timer: bool,
 ) -> None:
     """Run the full multi-iteration evolve loop."""
     import time as _time
@@ -372,6 +382,13 @@ async def _run_evolve(
         # Print total wall-clock time
         wall_secs = _time.monotonic() - t_wall_start
         console.print(f"\n[dim]Total time: {_format_duration(wall_secs)}[/dim]")
+
+        # Print debug timer report if enabled
+        if debug_timer:
+            report = evolve_ctx.timer.format_report(wall_time=wall_secs)
+            if report:
+                console.print(f"\n[dim]Phase timing breakdown:[/dim]")
+                console.print(f"[dim]{report}[/dim]")
 
     finally:
         display.stop()

@@ -448,6 +448,7 @@ def register_evolve_tools(
                 timeout=timeout_sec, cwd=str(ctx.git.repo_root),
             )
             elapsed = time.monotonic() - t0
+            ctx.timer.record("build_subprocess", elapsed)
 
             success = result.returncode == 0
             error_output = ""
@@ -619,6 +620,7 @@ def register_evolve_tools(
                 timeout=timeout_sec, cwd=str(ctx.git.repo_root),
             )
             elapsed = time.monotonic() - t0
+            ctx.timer.record("run_subprocess", elapsed)
 
             stdout = result.stdout
             stderr = result.stderr
@@ -752,13 +754,14 @@ def register_evolve_tools(
                 ctx.reader = reader
 
             # Profile the modified binary (suppress spinner — evolve display is active)
-            result = profiler.profile_basic(
-                ctx.executable,
-                ctx.exe_args,
-                metric_set_override=ncu_set,
-                metrics_override=ncu_metrics,
-                no_spinner=True,
-            )
+            with ctx.timer.phase("ncu_subprocess"):
+                result = profiler.profile_basic(
+                    ctx.executable,
+                    ctx.exe_args,
+                    metric_set_override=ncu_set,
+                    metrics_override=ncu_metrics,
+                    no_spinner=True,
+                )
             if not result.success or result.data is None:
                 return ToolResult.fail(
                     ErrorCode.ANALYZER_FAILED,
@@ -770,7 +773,8 @@ def register_evolve_tools(
             _log.info("New NCU report: %s", ncu_rep_path)
 
             # Load the new report
-            load_result = reader.load(str(ncu_rep_path))
+            with ctx.timer.phase("report_load"):
+                load_result = reader.load(str(ncu_rep_path))
             if not load_result.success or load_result.data is None:
                 return ToolResult.fail(
                     ErrorCode.ANALYZER_FAILED,
