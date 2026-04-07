@@ -44,6 +44,13 @@ _EVOLVE_TOOLS = {
     "get_evolve_status",
 }
 
+# Analysis tools unlocked in deep mode (Phase 2) for SASS/stall investigation
+_DEEP_ANALYSIS_TOOLS = {
+    "get_stall_analysis_for_line",
+    "get_sass_for_source_line",
+    "get_performance_hotspots",
+}
+
 # Map tool names → display status
 _TOOL_STATUS = {
     "read_source_file": "READING",
@@ -153,6 +160,21 @@ class EvolveOrchestrator:
                 if self._on_iteration:
                     self._on_iteration(record)
 
+                # Deep mode: activate analysis after 2 consecutive stagnations
+                if (self._ctx.config.deep
+                        and not self._ctx.deep_active
+                        and session.convergence_count >= 2):
+                    self._ctx.deep_active = True
+                    _log.info(
+                        "Deep analysis activated after %d stagnation events",
+                        session.convergence_count,
+                    )
+                    if self._display:
+                        self._display.notify(
+                            "[cyan]Deep Analysis Mode activated — "
+                            "NCU bottleneck data now enabled.[/cyan]"
+                        )
+
                 # Only real crashes (agent loop exceptions) are fatal.
                 # Transient issues (API glitch, no tool calls) are just
                 # FAILED iterations — the loop continues naturally.
@@ -211,6 +233,7 @@ class EvolveOrchestrator:
                     session.convergence_count = 0
                     session.best_metrics = None
                     session.best_iteration = -1
+                    self._ctx.deep_active = False
                     strategy_reset = True
                     direction_iter = 0
 
@@ -259,7 +282,8 @@ class EvolveOrchestrator:
         session = self._ctx.evolve
         session.start_new_experiment()
 
-        evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
+        _toolset = _EVOLVE_TOOLS | (_DEEP_ANALYSIS_TOOLS if self._ctx.deep_active else set())
+        evolve_registry = self._registry.filter(_toolset)
         kernel_summary = self._format_kernel_summary()
         source_files_str = self._format_source_files()
         skill_knowledge, skill_brief = self._query_skills("evolve")
@@ -276,7 +300,7 @@ class EvolveOrchestrator:
             kernel_summary=kernel_summary,
             source_files=source_files_str,
             skill_knowledge=skill_knowledge,
-            deep=self._ctx.config.deep,
+            deep=self._ctx.deep_active,
         )
 
         lean_prompt = build_evolve_lean_prompt(
@@ -291,7 +315,7 @@ class EvolveOrchestrator:
             kernel_summary=kernel_summary,
             source_files=source_files_str,
             skill_brief=skill_brief,
-            deep=self._ctx.config.deep,
+            deep=self._ctx.deep_active,
         )
 
         async for event in run_agent_loop(
@@ -339,7 +363,8 @@ class EvolveOrchestrator:
             self._display.set_status("THINKING")
 
         # Filter registry to evolve-only tools (prevents analysis tool waste)
-        evolve_registry = self._registry.filter(_EVOLVE_TOOLS)
+        _toolset = _EVOLVE_TOOLS | (_DEEP_ANALYSIS_TOOLS if self._ctx.deep_active else set())
+        evolve_registry = self._registry.filter(_toolset)
 
         timer = self._ctx.timer
 
@@ -361,7 +386,7 @@ class EvolveOrchestrator:
                 kernel_summary=kernel_summary,
                 source_files=source_files_str,
                 skill_knowledge=skill_knowledge,
-                deep=self._ctx.config.deep,
+                deep=self._ctx.deep_active,
             )
 
             # Lean system prompt: used after turn 0 to save tokens
@@ -377,7 +402,7 @@ class EvolveOrchestrator:
                 kernel_summary=kernel_summary,
                 source_files=source_files_str,
                 skill_brief=skill_brief,
-                deep=self._ctx.config.deep,
+                deep=self._ctx.deep_active,
             )
 
             user_message = build_evolve_iteration_prompt(
@@ -1014,7 +1039,7 @@ class EvolveOrchestrator:
         else:
             parts.append("Classification: BALANCED")
         # Deep mode: inject source-level hotspot data for data-driven optimization
-        if self._ctx.config.deep:
+        if self._ctx.deep_active:
             hotspot_text = self._format_deep_hotspots()
             if hotspot_text:
                 parts.append(hotspot_text)

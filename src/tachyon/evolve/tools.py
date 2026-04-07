@@ -760,6 +760,7 @@ def register_evolve_tools(
                 )
 
             ctx.edit_locked = True
+            ctx.benchmark_fix_allowed = 0  # Measurement phase — no more edits
             from .models import MetricSnapshot
 
             # Need executable for re-profiling
@@ -900,7 +901,7 @@ def register_evolve_tools(
                     }
 
             # Deep mode: inject bottleneck analysis for data-driven optimization
-            if ctx.config.deep:
+            if ctx.deep_active:
                 bottleneck_data = _compute_bottleneck_summary(ctx)
                 if bottleneck_data:
                     result_data["bottleneck_analysis"] = bottleneck_data

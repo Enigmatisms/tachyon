@@ -115,6 +115,7 @@ def evolve(
         target_kernel=kernel,
         reprofile_ncu_set=ncu_set or ("detailed" if deep else None),
         deep=deep,
+        convergence_threshold=4 if deep else 3,
     )
 
     # Default run_cmd if not set
@@ -356,7 +357,7 @@ async def _run_evolve(
         registry=tool_registry,
         ctx=evolve_ctx,
         max_iterations=evolve_config.max_iterations,
-        max_agent_turns=25 if evolve_config.deep else 15,
+        max_agent_turns=16 if evolve_config.deep else 15,
         total_timeout=total_timeout,
         interactive=interactive,
         quiet=quiet,

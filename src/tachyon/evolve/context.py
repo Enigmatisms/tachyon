@@ -51,6 +51,7 @@ class EvolveContext:
         self.edit_fail_count = 0     # Consecutive edit match failures in iteration
         self.iteration_doomed = False  # Set True when iteration is unrecoverable
         self.timer = DebugTimer(enabled=False)  # Enabled via --debug-timer
+        self.deep_active: bool = False  # Activated after 2 consecutive rollbacks in --deep mode
 
     @property
     def allowed_source_paths(self) -> set[str]:

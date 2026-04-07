@@ -15,7 +15,6 @@ from .models import ExperimentRecord, ExperimentStatus, MetricSnapshot
 _log = logging.getLogger(__name__)
 
 _CONVERGENCE_THRESHOLD = 5.0  # percent
-_CONVERGENCE_COUNT = 3
 
 
 @dataclass
@@ -36,7 +35,7 @@ class EvolveSession:
 
     @property
     def has_converged(self) -> bool:
-        return self.convergence_count >= _CONVERGENCE_COUNT
+        return self.convergence_count >= self.config.convergence_threshold
 
     @property
     def is_finished(self) -> bool:

@@ -31,6 +31,7 @@ class EvolveConfig:
     allowed_edit_paths: list[str] = field(default_factory=list)
     reprofile_ncu_set: str = "basic"
     deep: bool = False
+    convergence_threshold: int = 3
 
     @classmethod
     def load(
@@ -101,6 +102,7 @@ class EvolveConfig:
             "allowed_edit_paths": ("allowed_edit_paths",),
             "reprofile_ncu_set": ("ncu_set",),
             "deep": ("deep",),
+            "convergence_threshold": ("convergence_threshold",),
         }
 
         for attr, keys in field_map.items():

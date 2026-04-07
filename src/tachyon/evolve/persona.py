@@ -52,13 +52,13 @@ def build_evolve_system_prompt(
         if deep:
             preloaded_parts.append(
                 "### Deep Analysis Mode\n"
-                "Hotspot data (severity %, SPI, stall type, focus_hint) is in the Kernel section "
-                "above and in every reprofile result. Your workflow:\n"
-                "1. **Read** the top hotspot line (from Hotspots list above, or reprofile bottleneck_analysis)\n"
-                "2. **Make ONE targeted edit** at that exact line based on dominant_stall + focus_hint\n"
-                "3. **Immediately compile** — do NOT read more lines or make additional edits first\n"
-                "4. After reprofile, check if top hotspot severity decreased. If it shifted, target the new line.\n"
-                "Do NOT explore the file or make speculative edits. Data-driven means: read hotspot → edit → measure.\n"
+                "Call `get_performance_hotspots(kernel_id=N)` to get a compact "
+                "overview of all source-level hotspots and pinpoint bottlenecks. "
+                "Use get_stall_analysis_for_line(kernel_id=0, file, line) and "
+                "get_sass_for_source_line(kernel_id=0, file, line) to investigate "
+                "the top hotspot before editing. kernel_id=0 is the target kernel. "
+                "Then make ONE targeted edit based on the stall/SASS analysis, "
+                "and immediately compile.\n"
             )
         preloaded = "\n".join(preloaded_parts)
 
@@ -141,8 +141,9 @@ def build_evolve_lean_prompt(
     if deep:
         parts.append(
             "\n## Deep Analysis\n"
-            "Read top hotspot line → ONE edit at that line → compile immediately.\n"
-            "Do NOT read multiple lines or make extra edits before compiling.\n"
+            "Pinpoint bottlenecks using get_performance_hotspots(kernel_id=N) "
+            "Analyze top hotspot with get_stall_analysis_for_line(kernel_id=0) "
+            "and get_sass_for_source_line(kernel_id=0), then ONE edit → compile.\n"
         )
 
     return "\n".join(parts)
