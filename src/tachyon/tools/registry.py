@@ -21,6 +21,17 @@ from ..errors.handler import ErrorCode, ToolResult
 _log = logging.getLogger(__name__)
 
 
+# --- Concurrency classification for parallel tool execution ---
+# Inspired by Claude Code's pnH class design:
+# - SAFE: Read-only operations that can execute in parallel (e.g., read files, query status)
+# - SEQUENTIAL: Operations with side effects that must execute in order (e.g., edit files)
+# - EXCLUSIVE: Resource-intensive operations that should run alone (e.g., compile, benchmark)
+class ToolConcurrency:
+    SAFE = "safe"           # Can run in parallel with other SAFE tools
+    SEQUENTIAL = "sequential"  # Must run sequentially, one at a time
+    EXCLUSIVE = "exclusive"    # Must run exclusively, no other tools in parallel
+
+
 @dataclass
 class ToolDefinition:
     """A single tool's metadata + execution entry point.
@@ -29,12 +40,18 @@ class ToolDefinition:
     to OpenAI / Anthropic / MCP tool spec formats.
 
     category is a Tachyon-internal label for grouping (not sent to LLM APIs).
+    concurrency controls whether the tool can be executed in parallel with others.
     """
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema
     handler: Callable[..., Awaitable[ToolResult]] | None = None
     category: str = "general"
+    concurrency: str = ToolConcurrency.SEQUENTIAL  # default: safe, not parallel
+
+    def is_concurrency_safe(self) -> bool:
+        """Check if this tool can be safely executed in parallel."""
+        return self.concurrency == ToolConcurrency.SAFE
 
     def to_openai(self) -> dict:
         """Convert to OpenAI function calling format."""

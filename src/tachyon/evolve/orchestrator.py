@@ -129,7 +129,7 @@ class EvolveOrchestrator:
         user_feedback: str = ""
         strategy_reset: bool = False
         direction_iter: int = 0  # iterations since last direction reset
-        original_branch = self._ctx.git.get_current_branch()
+        original_branch = await self._ctx.git.get_current_branch_async()
 
         try:
             while not session.is_finished:
@@ -198,20 +198,20 @@ class EvolveOrchestrator:
                     )
                     try:
                         # Clean unstaged changes from last iteration
-                        self._ctx.git._run(["checkout", "."])
-                        self._ctx.git._run(["clean", "-fd"])
+                        await self._ctx.git.checkout_files_async()
+                        await self._ctx.git.clean_untracked_async()
 
                         # Commit staged (accepted) changes to a new branch
                         exhausted = f"tachyon-optimized-{int(time.time())}"
-                        self._ctx.git.create_branch(exhausted)
-                        self._ctx.git.checkout(exhausted)
-                        self._ctx.git.snapshot(
+                        await self._ctx.git.create_branch_async(exhausted)
+                        await self._ctx.git.checkout_async(exhausted)
+                        await self._ctx.git.snapshot_async(
                             f"[tachyon] optimized kernel "
                             f"(best improvement from iter {session.best_iteration})"
                         )
 
                         # Switch back to original branch (clean state)
-                        self._ctx.git.checkout(original_branch)
+                        await self._ctx.git.checkout_async(original_branch)
                         _log.info(
                             "Saved optimized state to branch %s, "
                             "back on %s for new direction.",
@@ -243,12 +243,12 @@ class EvolveOrchestrator:
                     )
 
             # --- Finalize: save current direction + apply global best ---
-            self._finalize_global_best(session, original_branch)
+            await self._finalize_global_best(session, original_branch)
 
         finally:
-            current = self._ctx.git.get_current_branch()
+            current = await self._ctx.git.get_current_branch_async()
             if current != original_branch:
-                self._ctx.git.checkout(original_branch)
+                await self._ctx.git.checkout_async(original_branch)
 
         return results
 
@@ -331,6 +331,12 @@ class EvolveOrchestrator:
             lean_system_prompt=lean_prompt,
             urgent_compile_tool="compile_kernel",
             force_stop_check=self._check_force_stop,
+            critical_tools={
+                "edit_source_file",
+                "compile_kernel",
+                "run_benchmark",
+                "reprofile",
+            },
         ):
             yield event
 
@@ -425,8 +431,8 @@ class EvolveOrchestrator:
 
         # Save working tree state for rollback (no commit)
         with timer.phase("git_ops"):
-            state_patch = self._ctx.git.save_working_state()
-            record.git_commit_hash = self._ctx.git.get_current_hash()
+            state_patch = await self._ctx.git.save_working_state_async()
+            record.git_commit_hash = await self._ctx.git.get_current_hash_async()
 
         # Run agent loop and track tool calls
         temperature = min(_TEMP_BASE + direction_iter * _TEMP_STEP, _TEMP_MAX)
@@ -456,6 +462,12 @@ class EvolveOrchestrator:
                 urgent_compile_tool="compile_kernel",
                 force_stop_check=self._check_force_stop,
                 temperature=temperature,
+                critical_tools={
+                    "edit_source_file",
+                    "compile_kernel",
+                    "run_benchmark",
+                    "reprofile",
+                },
             ):
                 if event.type == "text" and event.content:
                     hypothesis_parts.append(event.content)
@@ -554,10 +566,10 @@ class EvolveOrchestrator:
 
         if not fatal:
             with timer.phase("evaluate"):
-                self._evaluate_iteration(record, state_patch)
+                await self._evaluate_iteration(record, state_patch)
         else:
             with timer.phase("rollback"):
-                self._rollback(record, state_patch)
+                await self._rollback(record, state_patch)
 
         return record, fatal
 
@@ -622,7 +634,7 @@ class EvolveOrchestrator:
         elif sentences:
             record.summary = _cap(" ".join(sentences[-3:]))
 
-    def _evaluate_iteration(
+    async def _evaluate_iteration(
         self,
         record: ExperimentRecord,
         state_patch: str | None,
@@ -631,7 +643,7 @@ class EvolveOrchestrator:
         # Don't overwrite a pre-existing failure (e.g. LLM error set
         # before this point).  Just rollback and move on.
         if record.status == ExperimentStatus.FAILED and record.decision:
-            self._rollback(record, state_patch)
+            await self._rollback(record, state_patch)
             return
 
         build_ok = True
@@ -659,13 +671,13 @@ class EvolveOrchestrator:
             _log.warning("Iteration %d: %s", record.iteration, reason)
             record.status = ExperimentStatus.FAILED
             record.decision = reason
-            self._rollback(record, state_patch)
+            await self._rollback(record, state_patch)
             return
 
         if has_compiled and not build_ok:
             record.status = ExperimentStatus.FAILED
             record.decision = "Compilation failed — fix build errors before retrying."
-            self._rollback(record, state_patch)
+            await self._rollback(record, state_patch)
             return
 
         if record.run_exit_code is not None and record.run_exit_code != 0:
@@ -674,7 +686,7 @@ class EvolveOrchestrator:
                 f"Binary crashed (exit code {record.run_exit_code}). "
                 "Optimization may have broken correctness."
             )
-            self._rollback(record, state_patch)
+            await self._rollback(record, state_patch)
             return
 
         if record.optimized_metrics is None:
@@ -685,7 +697,7 @@ class EvolveOrchestrator:
                 "reprofile was not called. "
                 "Always run: compile_kernel → run_benchmark → reprofile."
             )
-            self._rollback(record, state_patch)
+            await self._rollback(record, state_patch)
             return
 
         if record.optimized_metrics is not None and self._ctx.evolve.baseline_metrics is not None:
@@ -720,7 +732,7 @@ class EvolveOrchestrator:
                     # Stage accepted files so rollbacks preserve them
                     if record.code_changes:
                         changed = list({c.file for c in record.code_changes})
-                        self._ctx.git.stage_files(changed)
+                        await self._ctx.git.stage_files_async(changed)
                 elif pct >= 0:
                     record.status = ExperimentStatus.REGRESSION
                     record.decision = (
@@ -728,16 +740,16 @@ class EvolveOrchestrator:
                         f"(<{_SIGNIFICANT_THRESHOLD:.0f}% threshold)"
                     )
                     self._ctx.evolve.convergence_count += 1
-                    self._rollback(record, state_patch)
+                    await self._rollback(record, state_patch)
                 else:
                     record.status = ExperimentStatus.REGRESSION
                     record.decision = f"Rejected: GPU time +{-pct:.1f}%"
                     self._ctx.evolve.convergence_count += 1
-                    self._rollback(record, state_patch)
+                    await self._rollback(record, state_patch)
             else:
                 record.status = ExperimentStatus.FAILED
                 record.decision = "No GPU time data collected."
-                self._rollback(record, state_patch)
+                await self._rollback(record, state_patch)
         else:
             if record.optimized_metrics is not None and self._ctx.evolve.baseline_metrics is None:
                 self._ctx.evolve.baseline_metrics = record.optimized_metrics
@@ -746,9 +758,9 @@ class EvolveOrchestrator:
                 self._ctx.evolve.record_improvement(record)
                 if record.code_changes:
                     changed = list({c.file for c in record.code_changes})
-                    self._ctx.git.stage_files(changed)
+                    await self._ctx.git.stage_files_async(changed)
 
-    def _rollback(
+    async def _rollback(
         self,
         record: ExperimentRecord,
         state_patch: str,
@@ -758,14 +770,14 @@ class EvolveOrchestrator:
         if not state_patch:
             return
 
-        success = self._ctx.git.restore_working_state(state_patch)
+        success = await self._ctx.git.restore_working_state_async(state_patch)
         if success:
             # Preserve FAILED status for diagnostics; only override others
             if record.status != ExperimentStatus.FAILED:
                 record.status = ExperimentStatus.ROLLED_BACK
             _log.info("Rolled back iteration %d.", record.iteration)
 
-    def _finalize_global_best(
+    async def _finalize_global_best(
         self,
         session,
         original_branch: str,
@@ -783,20 +795,20 @@ class EvolveOrchestrator:
         # Save current direction if it has unsaved accepted changes
         if session.best_metrics is not None:
             try:
-                git._run(["checkout", "."])
-                git._run(["clean", "-fd"])
+                await git.checkout_files_async()
+                await git.clean_untracked_async()
                 # Check if there are staged changes to save
-                staged = git._run(["diff", "--cached", "--stat"])
-                if staged.stdout.strip():
+                staged = await git.diff_cached_stat_async()
+                if staged.strip():
                     final_branch = f"tachyon-optimized-{int(time.time())}"
-                    git.create_branch(final_branch)
-                    git.checkout(final_branch)
-                    git.snapshot(
+                    await git.create_branch_async(final_branch)
+                    await git.checkout_async(final_branch)
+                    await git.snapshot_async(
                         f"[tachyon] optimized kernel "
                         f"(best from iter {session.best_iteration})"
                     )
                     session.record_direction_best(final_branch)
-                    git.checkout(original_branch)
+                    await git.checkout_async(original_branch)
             except Exception as e:
                 _log.warning("Failed to save final direction: %s", e)
 
@@ -806,14 +818,14 @@ class EvolveOrchestrator:
 
         try:
             # Ensure we're on the original branch
-            current = git.get_current_branch()
+            current = await git.get_current_branch_async()
             if current != original_branch:
-                git.checkout(original_branch)
+                await git.checkout_async(original_branch)
 
             # Apply global best: pull file state from best branch
-            git._run(["checkout", global_branch, "--", "."])
+            await git.checkout_from_branch_async(global_branch)
             # Unstage so changes appear as working tree modifications
-            git._run(["reset", "HEAD"])
+            await git.reset_head_async()
 
             if self._display:
                 dur = session.global_best_metrics.duration_ms if session.global_best_metrics else None
@@ -824,16 +836,10 @@ class EvolveOrchestrator:
                 )
 
             # Clean up all tachyon-optimized-* branches
-            branch_result = git._run(
-                ["for-each-ref", "--format=%(refname:short)",
-                 "refs/heads/tachyon-optimized-*"],
-                check=False,
-            )
-            if branch_result.returncode == 0 and branch_result.stdout.strip():
-                for b in branch_result.stdout.strip().splitlines():
-                    b = b.strip()
-                    if b:
-                        git._run(["branch", "-D", b], check=False)
+            branches = await git.list_branches_async("tachyon-optimized-*")
+            for b in branches:
+                await git.delete_branch_async(b)
+            if branches:
                 _log.info("Cleaned up optimization branches.")
         except Exception as e:
             _log.warning("Failed to apply global best: %s", e)
@@ -936,6 +942,10 @@ class EvolveOrchestrator:
         return self._format_snapshot(best)
 
     def _format_experiment_history(self) -> str:
+        """Format experiment history for LLM context.
+
+        Shows all iterations with full details so LLM can learn from past attempts.
+        """
         experiments = self._ctx.evolve.experiments
         if not experiments:
             return ""

@@ -5,6 +5,7 @@ closure-over-ctx pattern as the existing 12 analysis tools.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors.handler import ErrorCode, ToolResult
-from ..tools.registry import ToolDefinition, ToolRegistry
+from ..tools.registry import ToolConcurrency, ToolDefinition, ToolRegistry
 from .context import EvolveContext
 
 _log = logging.getLogger(__name__)
@@ -188,7 +189,10 @@ def _run_cmd(
     timeout: int,
     cwd: str,
 ) -> subprocess.CompletedProcess:
-    """Run a command, using shell mode for trusted defaults."""
+    """Run a command synchronously (blocking).
+
+    For backward compatibility. Prefer _run_cmd_async for new code.
+    """
     if is_default:
         return subprocess.run(
             cmd_str, shell=True,
@@ -200,6 +204,51 @@ def _run_cmd(
         capture_output=True, text=True,
         timeout=timeout, cwd=cwd,
     )
+
+
+async def _run_cmd_async(
+    cmd_str: str,
+    *,
+    is_default: bool,
+    timeout: int,
+    cwd: str,
+) -> subprocess.CompletedProcess:
+    """Run a command asynchronously (non-blocking).
+
+    Uses asyncio.create_subprocess_exec/shell for non-blocking execution.
+    This prevents blocking the event loop during long-running
+    operations like compilation or benchmarking.
+    """
+    if is_default:
+        proc = await asyncio.create_subprocess_shell(
+            cmd_str,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            *shlex.split(cmd_str),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout
+        )
+        return subprocess.CompletedProcess(
+            args=cmd_str if is_default else shlex.split(cmd_str),
+            returncode=proc.returncode,
+            stdout=stdout.decode('utf-8', errors='replace'),
+            stderr=stderr.decode('utf-8', errors='replace'),
+        )
+    except asyncio.TimeoutExpired:
+        proc.kill()
+        await proc.wait()
+        raise
 
 
 def _compute_bottleneck_summary(ctx: EvolveContext) -> dict | None:
@@ -426,6 +475,7 @@ def register_evolve_tools(
         },
         handler=edit_source_file,
         category="evolve",
+        concurrency=ToolConcurrency.SEQUENTIAL,  # Modifies files, must be sequential
     ))
 
     # --- 2. compile_kernel ---
@@ -485,7 +535,7 @@ def register_evolve_tools(
                         ctx.git.repo_root, effective_cmd,
                     )
 
-            result = _run_cmd(
+            result = await _run_cmd_async(
                 effective_cmd, is_default=is_default,
                 timeout=timeout_sec, cwd=str(ctx.git.repo_root),
             )
@@ -591,6 +641,7 @@ def register_evolve_tools(
         },
         handler=compile_kernel,
         category="evolve",
+        concurrency=ToolConcurrency.EXCLUSIVE,  # Resource-intensive, modifies binary
     ))
 
     # --- 3. run_benchmark ---
@@ -656,7 +707,7 @@ def register_evolve_tools(
                 if m:
                     effective_run_cmd = stripped[m.end():]
 
-            result = _run_cmd(
+            result = await _run_cmd_async(
                 effective_run_cmd, is_default=is_default,
                 timeout=timeout_sec, cwd=str(ctx.git.repo_root),
             )
@@ -737,6 +788,7 @@ def register_evolve_tools(
         },
         handler=run_benchmark,
         category="evolve",
+        concurrency=ToolConcurrency.EXCLUSIVE,  # Resource-intensive benchmark run
     ))
 
     # --- 4. reprofile ---
@@ -939,6 +991,7 @@ def register_evolve_tools(
         },
         handler=reprofile,
         category="evolve",
+        concurrency=ToolConcurrency.EXCLUSIVE,  # NCU profiling is resource-intensive
     ))
 
     # --- 5. compare_metrics ---
@@ -1043,6 +1096,7 @@ def register_evolve_tools(
         },
         handler=compare_metrics,
         category="evolve",
+        concurrency=ToolConcurrency.SAFE,  # Read-only comparison, safe to parallelize
     ))
 
     # --- 6. get_evolve_status ---
@@ -1108,6 +1162,7 @@ def register_evolve_tools(
         },
         handler=get_evolve_status,
         category="evolve",
+        concurrency=ToolConcurrency.SAFE,  # Read-only status check, safe to parallelize
     ))
 
 

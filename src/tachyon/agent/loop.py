@@ -18,6 +18,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..llm.backend import (
@@ -28,7 +29,7 @@ from ..llm.backend import (
     StreamChunk,
     ToolCall,
 )
-from ..tools.registry import ToolRegistry
+from ..tools.registry import ToolConcurrency, ToolRegistry
 from .context import ContextManager
 from ..utils.debug_record import record_prompt, record_tool, level as _debug_level
 
@@ -66,6 +67,48 @@ def _has_called_tool(messages: list[Message], tool_name: str) -> bool:
             if any(tc.name == tool_name for tc in msg.tool_calls):
                 return True
     return False
+
+
+def _get_used_tool_names(messages: list[Message]) -> set[str]:
+    """Extract all tool names that have been called in the message history."""
+    used = set()
+    for msg in messages:
+        if msg.role == Role.TOOL and msg.name:
+            used.add(msg.name)
+        if msg.role == Role.ASSISTANT and msg.tool_calls:
+            for tc in msg.tool_calls:
+                used.add(tc.name)
+    return used
+
+
+def _get_deferred_tool_defs(
+    registry: ToolRegistry,
+    messages: list[Message],
+    turn: int,
+    critical_tools: set[str] | None = None,
+) -> list:
+    """Get tool definitions with deferred loading for token efficiency.
+
+    Turn 0: Return all tool definitions (LLM needs to know all available tools).
+    Turn > 0: Only return tools that have been used + critical tools.
+
+    Critical tools are those that should always be available (e.g., edit, compile).
+    """
+    if turn == 0:
+        return registry.all_definitions()
+
+    used_tools = _get_used_tool_names(messages)
+    critical = critical_tools or set()
+
+    # Combine used tools with critical tools
+    needed = used_tools | critical
+
+    # Filter registry to only include needed tools
+    if needed:
+        return [td for td in registry.all_definitions() if td.name in needed]
+
+    # Fallback: if no tools have been used, return all (shouldn't happen in turn > 0)
+    return registry.all_definitions()
 
 
 @dataclass
@@ -112,6 +155,106 @@ def _serialize_tool_result(result: Any) -> str:
     return json.dumps(error_obj, ensure_ascii=False, default=str)
 
 
+# Large result persistence: save to disk if result exceeds this size
+_LARGE_RESULT_THRESHOLD = 2048  # 2KB
+_PERSIST_DIR = Path(".tachyon") / "persisted_results"
+
+
+def _persist_large_result(
+    result_str: str,
+    tool_name: str,
+    tool_call_id: str,
+) -> str:
+    """Persist large tool result to disk and return a preview string.
+
+    When result_str exceeds _LARGE_RESULT_THRESHOLD, saves the full content
+    to disk and returns a summary with preview for the LLM message.
+
+    Args:
+        result_str: The serialized tool result string
+        tool_name: Name of the tool that produced the result
+        tool_call_id: Unique ID for this tool call
+
+    Returns:
+        Either the original result_str (if small) or a preview summary
+    """
+    if len(result_str) <= _LARGE_RESULT_THRESHOLD:
+        return result_str
+
+    # Create persistence directory
+    persist_dir = _PERSIST_DIR
+    persist_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique filename
+    import hashlib
+    content_hash = hashlib.md5(result_str.encode()).hexdigest()[:8]
+    filename = f"{tool_name}_{tool_call_id}_{content_hash}.json"
+    filepath = persist_dir / filename
+
+    # Save full result
+    filepath.write_text(result_str, encoding="utf-8")
+
+    # Create preview (first 1KB)
+    preview = result_str[:1024]
+    if len(result_str) > 1024:
+        preview += "..."
+
+    # Return summary for LLM
+    size_kb = len(result_str) / 1024
+    return (
+        f'<persisted-output>\n'
+        f'Output too large ({size_kb:.1f}KB). Full output saved to: {filepath}\n'
+        f'Preview (first 1KB):\n{preview}\n'
+        f'</persisted-output>'
+    )
+
+
+# Large result persistence: save to disk if exceeds threshold
+_PERSIST_THRESHOLD = 2048  # 2KB
+_PREVIEW_LENGTH = 512  # Show first 512 chars in message
+_PERSIST_DIR = ".tachyon/persisted"
+
+
+def _persist_large_result(result_str: str, tool_name: str, turn: int) -> str:
+    """Persist large tool result to disk and return preview for message.
+
+    If result is small, return as-is. If large, save to disk and return
+    a truncated preview with path to full file.
+    """
+    if len(result_str) <= _PERSIST_THRESHOLD:
+        return result_str
+
+    from datetime import datetime
+    from pathlib import Path
+
+    # Create persisted directory
+    persist_dir = Path(_PERSIST_DIR)
+    persist_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = tool_name.replace("/", "_").replace("\\", "_")
+    filename = f"{safe_name}_{turn}_{timestamp}.json"
+    filepath = persist_dir / filename
+
+    # Write full result to disk
+    filepath.write_text(result_str, encoding="utf-8")
+
+    # Return preview with path
+    preview = result_str[:_PREVIEW_LENGTH]
+    remaining = len(result_str) - _PREVIEW_LENGTH
+
+    return (
+        f"<persisted-output size=\"{len(result_str)} bytes\">\n"
+        f"Output too large ({len(result_str):,} bytes). "
+        f"Full output saved to: {filepath}\n"
+        f"Preview (first {_PREVIEW_LENGTH} chars):\n"
+        f"{preview}\n"
+        f"... ({remaining:,} more chars)\n"
+        f"</persisted-output>"
+    )
+
+
 async def run_agent_loop(
     backend: LLMBackend,
     registry: ToolRegistry,
@@ -132,6 +275,7 @@ async def run_agent_loop(
     urgent_compile_tool: str | None = None,
     force_stop_check: Callable[[list[Message], int], str | None] | None = None,
     temperature: float = 0.1,
+    critical_tools: set[str] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the multi-turn agent loop.
 
@@ -160,6 +304,9 @@ async def run_agent_loop(
         force_stop_check: Optional callback invoked after each turn's tool
             calls complete.  If it returns a non-None string, the agent loop
             terminates immediately and yields a system event with that reason.
+        critical_tools: Set of tool names that should always be available
+            (in addition to already-used tools). Used for deferred tool
+            schema loading to save tokens. If None, defaults to empty set.
 
     Yields:
         AgentEvent instances for the caller to render.
@@ -178,10 +325,16 @@ async def run_agent_loop(
     )
     messages.append(Message(role=Role.USER, content=_prepend_lang_hint(user_message, explicit_lang=_chinese)))
 
-    tool_defs = registry.all_definitions()
+    # Prepare critical tools set for deferred loading
+    _critical = critical_tools or set()
+    if urgent_compile_tool:
+        _critical.add(urgent_compile_tool)
 
     for turn in range(max_turns):
         usage.turns = turn + 1
+
+        # Deferred tool schema loading: Turn 0 sends all, Turn > 0 sends only used + critical
+        tool_defs = _get_deferred_tool_defs(registry, messages, turn, _critical)
 
         # Total timeout check
         elapsed = time.monotonic() - t_start
@@ -381,7 +534,64 @@ async def run_agent_loop(
         if content:
             yield AgentEvent(type="thinking", content=content)
 
+        # --- Parallel Tool Execution ---
+        # Inspired by Claude Code's pnH design:
+        # 1. SAFE tools can run in parallel (read-only operations)
+        # 2. SEQUENTIAL tools must run one at a time (file modifications)
+        # 3. EXCLUSIVE tools must run alone (resource-intensive)
+
+        safe_calls = []
+        seq_calls = []
+
         for tc in tool_calls:
+            tool_def = registry.get(tc.name)
+            if tool_def and tool_def.is_concurrency_safe():
+                safe_calls.append(tc)
+            else:
+                seq_calls.append(tc)
+
+        # Execute SAFE tools in parallel
+        if safe_calls:
+            for tc in safe_calls:
+                usage.tool_calls += 1
+                yield AgentEvent(
+                    type="tool_call",
+                    content=f"Calling {tc.name}...",
+                    data={"name": tc.name, "arguments": tc.arguments},
+                )
+
+            t_parallel = time.monotonic()
+            safe_results = await asyncio.gather(
+                *[registry.execute(tc.name, tc.arguments) for tc in safe_calls],
+                return_exceptions=True
+            )
+
+            for tc, result in zip(safe_calls, safe_results):
+                tool_elapsed = time.monotonic() - t_parallel
+                if isinstance(result, Exception):
+                    result = ToolResult.fail(ErrorCode.UNKNOWN, str(result))
+
+                result_str = _serialize_tool_result(result)
+
+                record_tool(tc.name, tc.arguments, result_str, tool_elapsed, result.success)
+
+                yield AgentEvent(
+                    type="tool_result",
+                    content=f"{tc.name}: {'OK' if result.success else 'ERROR'}",
+                    data={"name": tc.name, "success": result.success,
+                          "summary": result_str[:200],
+                          "elapsed": round(tool_elapsed, 2)},
+                )
+
+                messages.append(Message(
+                    role=Role.TOOL,
+                    content=result_str,
+                    tool_call_id=tc.id,
+                    name=tc.name,
+                ))
+
+        # Execute SEQUENTIAL/EXCLUSIVE tools one at a time
+        for tc in seq_calls:
             usage.tool_calls += 1
             yield AgentEvent(
                 type="tool_call",
@@ -395,7 +605,6 @@ async def run_agent_loop(
 
             result_str = _serialize_tool_result(result)
 
-            # Debug: record tool call and result
             record_tool(tc.name, tc.arguments, result_str, tool_elapsed, result.success)
 
             yield AgentEvent(
