@@ -69,8 +69,8 @@ def _has_called_tool(messages: list[Message], tool_name: str) -> bool:
     return False
 
 
-def _get_used_tool_names(messages: list[Message]) -> set[str]:
-    """Extract all tool names that have been called in the message history."""
+def _extract_tool_names_from_messages(messages: list[Message]) -> set[str]:
+    """Extract tool names from a list of messages (for initial scan only)."""
     used = set()
     for msg in messages:
         if msg.role == Role.TOOL and msg.name:
@@ -83,7 +83,7 @@ def _get_used_tool_names(messages: list[Message]) -> set[str]:
 
 def _get_deferred_tool_defs(
     registry: ToolRegistry,
-    messages: list[Message],
+    used_tools: set[str],
     turn: int,
     critical_tools: set[str] | None = None,
 ) -> list:
@@ -97,7 +97,6 @@ def _get_deferred_tool_defs(
     if turn == 0:
         return registry.all_definitions()
 
-    used_tools = _get_used_tool_names(messages)
     critical = critical_tools or set()
 
     # Combine used tools with critical tools
@@ -330,11 +329,14 @@ async def run_agent_loop(
     if urgent_compile_tool:
         _critical.add(urgent_compile_tool)
 
+    # Cache used tools incrementally (avoid O(n) scan each turn)
+    used_tools: set[str] = _extract_tool_names_from_messages(messages)
+
     for turn in range(max_turns):
         usage.turns = turn + 1
 
         # Deferred tool schema loading: Turn 0 sends all, Turn > 0 sends only used + critical
-        tool_defs = _get_deferred_tool_defs(registry, messages, turn, _critical)
+        tool_defs = _get_deferred_tool_defs(registry, used_tools, turn, _critical)
 
         # Total timeout check
         elapsed = time.monotonic() - t_start
@@ -395,7 +397,7 @@ async def run_agent_loop(
             and urgent_compile_tool
             and remaining <= max(max_turns // 3, 3)
             and turn > 0
-            and not _has_called_tool(messages, urgent_compile_tool)
+            and urgent_compile_tool not in used_tools
         ):
             yield AgentEvent(
                 type="system",
@@ -530,6 +532,10 @@ async def run_agent_loop(
             content=content,
             tool_calls=tool_calls,
         ))
+
+        # Update used_tools cache incrementally (avoid O(n) scan next turn)
+        for tc in tool_calls:
+            used_tools.add(tc.name)
 
         if content:
             yield AgentEvent(type="thinking", content=content)
